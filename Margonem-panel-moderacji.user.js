@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Margonem — Centrum Moderacji v2
 // @namespace    https://github.com/Doiua97/panel-moderacji-weryfikacji
-// @version      3.3.54
+// @version      3.3.58
 // @description  Lokalne centrum moderacji i dokumentowania weryfikacji w Margonem.
 // @author       Doiua
 // @match        https://*.margonem.pl/*
@@ -28,13 +28,12 @@
 
   const RUNTIME_GUARD = "__MARGO_MODERATION_CENTER_RUNTIME__";
   if (window[RUNTIME_GUARD]) return;
-  window[RUNTIME_GUARD] = "3.3.54";
+  window[RUNTIME_GUARD] = "3.3.58";
 
   const SCRIPT_ID = "margo-moderation-center";
   const LOCAL_DATABASE_KEY = `${SCRIPT_ID}:local-database:v1`;
   const LOCAL_DATABASE_EVENT = `${SCRIPT_ID}:local-database-change`;
   const LAUNCHER_POSITION_KEY = `${SCRIPT_ID}:launcher-position`;
-  const LAUNCHER_LOCK_KEY = `${SCRIPT_ID}:launcher-locked`;
   const PANEL_POSITION_KEY = `${SCRIPT_ID}:panel-position`;
   const PANEL_OPEN_KEY = `${SCRIPT_ID}:panel-open`;
   const ACTIVE_PANEL_POSITION_KEY = `${SCRIPT_ID}:active-panel-position`;
@@ -332,20 +331,16 @@
     const launcher = document.createElement("button");
     launcher.id = `${SCRIPT_ID}-launcher`;
     launcher.type = "button";
-    launcher.innerHTML = `<strong>C</strong><i></i>`;
+    launcher.innerHTML = `<strong>C</strong>`;
     launcher.setAttribute("aria-label", "Otwórz lub zamknij Centrum Moderacji");
     document.body.appendChild(launcher);
     restorePosition(launcher, LAUNCHER_POSITION_KEY);
-    updateLauncherView(launcher);
     makeMovable(launcher, {
       positionKey: LAUNCHER_POSITION_KEY,
-      lockKey: LAUNCHER_LOCK_KEY,
       handle: launcher,
       click: () => {
         state.panel ? closePanel() : showPanel();
-      },
-      lockLabel: "Centrum Moderacji",
-      onLockChange: () => updateLauncherView(launcher)
+      }
     });
   }
 
@@ -391,10 +386,10 @@
         style.id = `${SCRIPT_ID}-widget-style`;
         style.textContent = `
           .main-buttons-container .widget-button .icon.${WIDGET_KEY}{
-            background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='44' height='44'%3E%3Cdefs%3E%3ClinearGradient id='g' x2='0' y2='1'%3E%3Cstop stop-color='%23182d3d'/%3E%3Cstop offset='1' stop-color='%23081420'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='2' y='2' width='40' height='40' rx='7' fill='url(%23g)' stroke='%235fd7d3' stroke-width='2'/%3E%3Ctext x='22' y='29' text-anchor='middle' font-family='Arial' font-size='22' font-weight='700' fill='%2369e3df'%3EC%3C/text%3E%3C/svg%3E")!important;
-            background-position:0 0!important;
-            background-size:44px 44px!important;
-            width:44px!important;height:44px!important;margin:0!important;top:0!important;left:0!important
+            background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='s' x2='0' y2='1'%3E%3Cstop stop-color='%23775a35'/%3E%3Cstop offset='.5' stop-color='%23412e1b'/%3E%3Cstop offset='1' stop-color='%231b130c'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M16 1.8 28.5 6v10.2c0 7-4.9 11.6-12.5 14.2C8.4 27.8 3.5 23.2 3.5 16.2V6z' fill='url(%23s)' stroke='%23e0b85b' stroke-width='1.6' stroke-linejoin='round'/%3E%3Cpath d='M16 6v17M9.2 11h13.6M10.5 11.3 6.7 18h7.6zM21.5 11.3 17.7 18h7.6zM11.7 25h8.6' fill='none' stroke='%23f1d06a' stroke-width='1.65' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M7.4 18h6.2M18.4 18h6.2' stroke='%238ead4d' stroke-width='1.5' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='6' r='2' fill='%23a84430' stroke='%23f1d06a' stroke-width='1'/%3E%3C/svg%3E")!important;
+            background-position:center!important;
+            background-repeat:no-repeat!important;
+            background-size:32px 32px!important
           }`;
         document.head.appendChild(style);
       }
@@ -415,20 +410,11 @@
     return false;
   }
 
-  function updateLauncherView(launcher) {
-    const locked = localStorage.getItem(LAUNCHER_LOCK_KEY) === "1";
-    launcher.dataset.locked = locked ? "1" : "0";
-    launcher.querySelector("i").textContent = locked ? "🔒" : "🔓";
-    launcher.title = locked
-      ? "Centrum Moderacji · PPM odblokowuje pozycję"
-      : "Centrum Moderacji · przeciągnij lub kliknij; PPM blokuje pozycję";
-  }
-
-  function makeMovable(element, { positionKey, lockKey, handle, click, lockLabel, onLockChange }) {
+  function makeMovable(element, { positionKey, handle, click }) {
     let drag = null;
     let moved = false;
     handle.addEventListener("pointerdown", event => {
-      if (event.button !== 0 || localStorage.getItem(lockKey) === "1") return;
+      if (event.button !== 0) return;
       if (event.target.closest("button") && event.target !== handle && element !== handle) return;
       const rect = element.getBoundingClientRect();
       drag = { x: event.clientX - rect.left, y: event.clientY - rect.top };
@@ -458,19 +444,6 @@
           return;
         }
         click();
-      });
-    }
-    // Blokowanie pozycji PPM dotyczy wyłącznie ikony uruchamiającej.
-    // Okno Centrum pozostaje zawsze przesuwalne za górną belkę.
-    if (element.id && onLockChange) {
-      element.addEventListener("contextmenu", event => {
-        if (!event.target.closest(`#${element.id}`)) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const next = localStorage.getItem(lockKey) === "1" ? "0" : "1";
-        localStorage.setItem(lockKey, next);
-        onLockChange();
-        notice(next === "1" ? `Pozycja „${lockLabel}” została zablokowana.` : `Pozycja „${lockLabel}” została odblokowana.`);
       });
     }
   }
@@ -585,9 +558,7 @@
     installPanelWheelScrolling(win);
     makeMovable(win, {
       positionKey: PANEL_POSITION_KEY,
-      lockKey: `${SCRIPT_ID}:never-lock-panel`,
-      handle: head,
-      lockLabel: "Centrum Moderacji"
+      handle: head
     });
     overlay.querySelector("[data-close]").addEventListener("click", closePanel);
     overlay.querySelector("[data-select-player]").addEventListener("click", selectFromSearch);
@@ -808,20 +779,18 @@
     return { content: resolved, missing: [...new Set(missing)] };
   }
 
-  async function executeModeratorCommand(action, explicitTargets = null, options = {}) {
-    const needsTarget = ["reminder", "mute", "unmute", "kill", "unkill", "chatadd", "chatdel"].includes(action);
+  async function executeAccountPenaltyCommand(action, explicitTargets = null, options = {}) {
+    if (action !== "kill" && action !== "unkill") return notice("Nieobsługiwane polecenie moderacyjne.");
     const fixedTime = Object.prototype.hasOwnProperty.call(options, "czas")
       ? normalize(options.czas)
       : null;
-    const targets = needsTarget
-      ? (Array.isArray(explicitTargets) ? explicitTargets : selectedPlayers())
-        .map(target => ({
-          nick: normalize(target?.nick || target?.name),
-          id: target?.id || resolvePlayerId(target?.nick || target?.name) || ""
-        }))
-        .filter(target => target.nick)
-      : [{ nick: "", id: "" }];
-    if (needsTarget && !targets.length) return notice("Najpierw wybierz gracza.");
+    const targets = (Array.isArray(explicitTargets) ? explicitTargets : selectedPlayers())
+      .map(target => ({
+        nick: normalize(target?.nick || target?.name),
+        id: target?.id || resolvePlayerId(target?.nick || target?.name) || ""
+      }))
+      .filter(target => target.nick);
+    if (!targets.length) return notice("Najpierw wybierz gracza.");
     const sentCommands = [];
     for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
       const target = targets[targetIndex];
@@ -835,48 +804,13 @@
       });
       let command = "";
       let label = "";
-      if (action === "reminder") {
-        const reminder = resolveTemplate(values.powod || "{kod}", values);
-        if (!reminder.content.trim() || reminder.missing.length) {
-          return notice(`Wpisz treść upomnienia lub wylosuj kod${reminder.missing.length ? ` (${reminder.missing.join(", ")})` : ""}.`);
-        }
-        command = `.reminder "${values.nick}" "${escapeConsole(reminder.content.trim())}"`;
-        label = "UPOMNIENIE";
-      } else if (action === "mute") {
-        if (!values.czas) return notice("Wpisz czas wyciszenia.");
-        command = `.mute "${values.nick}" ${values.czas}${values.powod ? ` "${escapeConsole(values.powod)}"` : ""}`;
-        label = "WYCISZENIE";
-      } else if (action === "unmute") {
-        command = `.unmute "${values.nick}"`;
-        label = "ZDJĘCIE WYCISZENIA";
-      } else if (action === "kill") {
+      if (action === "kill") {
         if (!values.czas) return notice("Wpisz czas kary.");
         command = `.kill "${values.nick}" ${values.czas}${values.powod ? ` "${escapeConsole(values.powod)}"` : ""}`;
         label = "ZABICIE POSTACI";
       } else if (action === "unkill") {
         command = `.unkill "${values.nick}"`;
         label = "ZDJĘCIE ZABICIA";
-      } else if (action === "chatlock") {
-        command = ".chatlock";
-        label = "BLOKADA CZATU";
-      } else if (action === "chatunlock") {
-        command = ".chatunlock";
-        label = "ODBLOKOWANIE CZATU";
-      } else if (action === "chatadd") {
-        command = `.chatadd "${values.nick}"`;
-        label = "DOSTĘP DO CZATU";
-      } else if (action === "chatdel") {
-        command = `.chatdel "${values.nick}"`;
-        label = "ODEBRANIE DOSTĘPU DO CZATU";
-      } else if (action === "chatlist") {
-        command = ".chatlist";
-        label = "LISTA UPRAWNIONYCH";
-      } else if (action === "reminderlist") {
-        command = ".reminderlist";
-        label = "LISTA UPOMNIEŃ";
-      } else if (action === "mutedlist") {
-        command = ".mutedlist";
-        label = "LISTA WYCISZONYCH";
       }
       if (!command) continue;
       if (!sendViaGameConsole(command)) return notice("Konsola gry nie jest obecnie dostępna.");
@@ -1385,7 +1319,7 @@
       + selected.map(character => `• ${character.nick}`).join("\n")
     );
     if (!confirmed) return;
-    await executeModeratorCommand(action, selected, { delayMs: 750, czas: time });
+    await executeAccountPenaltyCommand(action, selected, { delayMs: 750, czas: time });
   }
 
   function normalizeStartConfig(value = {}) {
@@ -1590,9 +1524,7 @@
     restorePosition(win, ACTIVE_PANEL_POSITION_KEY);
     makeMovable(win, {
       positionKey: ACTIVE_PANEL_POSITION_KEY,
-      lockKey: `${SCRIPT_ID}:never-lock-active-panel`,
-      handle: head,
-      lockLabel: "Aktywna weryfikacja"
+      handle: head
     });
     overlay.querySelector("[data-close-active]").addEventListener("click", () => closeActivePanel());
     renderActivePanel();
@@ -2720,7 +2652,7 @@
     style.textContent = `
       #${SCRIPT_ID}-launcher{position:fixed;right:14px;top:50%;z-index:2147483000;width:43px;height:43px;padding:0;border:2px solid #8b753b;border-radius:7px;background:linear-gradient(#3e4e29,#1e2815);box-shadow:0 4px 16px #000c;color:#f1d778;font:bold 24px/39px Georgia,serif;cursor:pointer}
       #${SCRIPT_ID}-launcher:hover{border-color:#d0b45f;background:linear-gradient(#526a33,#28391b)}
-      #${SCRIPT_ID}-launcher[data-locked="0"]{cursor:grab}#${SCRIPT_ID}-launcher i{position:absolute;right:-6px;bottom:-6px;width:18px;height:18px;border:1px solid #806a3d;border-radius:50%;background:#171713;font:10px/17px Arial}
+      #${SCRIPT_ID}-launcher{cursor:grab}
       #${SCRIPT_ID}-panel{position:fixed;inset:0;z-index:2147482999;pointer-events:none;color:#e8dfbf;font:12px Arial,sans-serif}
       #${SCRIPT_ID}-panel *{box-sizing:border-box}#${SCRIPT_ID}-panel .mc-window{position:absolute;right:70px;top:45px;width:min(455px,calc(100vw - 24px));height:auto;max-height:calc(100vh - 57px);overflow-x:hidden;overflow-y:auto;padding:10px;border:1px solid #66562c;border-radius:5px;background:rgba(28,26,21,.97);box-shadow:0 14px 42px #000c;pointer-events:auto;scrollbar-width:thin;scrollbar-color:#35556d #07131d}
       #${SCRIPT_ID}-panel .mc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding-bottom:9px;border-bottom:1px solid #5a4a27;cursor:move;user-select:none;touch-action:none}
@@ -2762,8 +2694,6 @@
       #${SCRIPT_ID}-notice{position:fixed;left:50%;top:70px;z-index:2147483647;max-width:560px;transform:translateX(-50%);padding:10px 14px;border:1px solid #806a3d;border-radius:4px;background:#24221e;color:#f2e4b1;box-shadow:0 5px 20px #000;font:13px Arial,sans-serif}
       #${SCRIPT_ID}-launcher{border-color:#2b6079;background:linear-gradient(145deg,#123346,#081824);color:#68ded9;font-family:Arial,sans-serif;box-shadow:0 5px 20px #000c}
       #${SCRIPT_ID}-launcher:hover{border-color:#68ded9;background:linear-gradient(145deg,#17445b,#0b2231)}
-      #${SCRIPT_ID}-launcher[data-locked="0"]{cursor:grab}
-      #${SCRIPT_ID}-launcher i{border-color:#2b6079;background:#07131d;color:#68ded9}
       #${SCRIPT_ID}-panel{color:#dce8f2;font-family:Arial,sans-serif}
       #${SCRIPT_ID}-panel .mc-window{border-color:#2b465c;background:rgba(8,18,28,.97);box-shadow:0 14px 42px #000d}
       #${SCRIPT_ID}-panel .mc-head{border-color:#29445a}
@@ -2812,6 +2742,119 @@
       #${SCRIPT_ID}-active-panel .mc-participant-actions{display:flex;flex-wrap:nowrap;align-items:center;justify-content:flex-end;min-width:0;gap:4px;margin-top:5px}
       #${SCRIPT_ID}-active-panel .mc-participant-actions span{flex:0 1 92px;min-width:52px;overflow:hidden;color:#8ea5b5;font-size:10px;text-overflow:ellipsis;white-space:nowrap}#${SCRIPT_ID}-active-panel .mc-participant-actions button{flex:1 1 0;min-width:0;padding:6px 3px;overflow:hidden;font-size:clamp(8px,1.15vw,11px);text-overflow:ellipsis;white-space:nowrap}
       #${SCRIPT_ID}-active-panel .mc-map-players div{display:flex;flex-wrap:wrap;gap:5px}
+
+      /* Przydymione okno NI: wyłącznie warstwa prezentacji, bez zmian układu. */
+      #${SCRIPT_ID}-panel,#${SCRIPT_ID}-ready-commands-dialog,#${SCRIPT_ID}-active-panel,#${SCRIPT_ID}-notice{
+        --mc-glass:rgba(16,17,15,.84);
+        --mc-glass-strong:rgba(10,11,10,.9);
+        --mc-surface:rgba(48,50,45,.5);
+        --mc-surface-strong:rgba(25,27,24,.7);
+        --mc-border:rgba(143,149,139,.55);
+        --mc-border-soft:rgba(112,118,108,.38);
+        --mc-text:#e3e1d7;
+        --mc-muted:#aaa99f;
+        --mc-green:#8fad62;
+        --mc-green-strong:#b1cb7d;
+        --mc-gold:#d2bc67;
+        --mc-danger:#c57a73;
+      }
+      #${SCRIPT_ID}-panel,#${SCRIPT_ID}-ready-commands-dialog,#${SCRIPT_ID}-active-panel{color:var(--mc-text);font-family:Arial,Tahoma,sans-serif}
+      #${SCRIPT_ID}-panel .mc-window,#${SCRIPT_ID}-ready-commands-dialog .mc-ready-dialog-window,#${SCRIPT_ID}-active-panel .mc-active-window{
+        border:1px solid var(--mc-border);
+        border-radius:3px;
+        background:linear-gradient(180deg,rgba(38,39,35,.86),var(--mc-glass) 48px,var(--mc-glass-strong));
+        box-shadow:inset 0 0 0 1px rgba(0,0,0,.82),inset 0 1px rgba(255,255,255,.07),0 8px 24px rgba(0,0,0,.68);
+        scrollbar-color:#696e64 rgba(9,10,9,.72)
+      }
+      #${SCRIPT_ID}-panel .mc-head,#${SCRIPT_ID}-ready-commands-dialog .mc-ready-dialog-head,#${SCRIPT_ID}-active-panel .mc-active-head{
+        border-color:var(--mc-border-soft);
+        background:linear-gradient(180deg,rgba(74,65,53,.32),rgba(17,18,16,.18));
+        box-shadow:0 1px rgba(0,0,0,.72)
+      }
+      #${SCRIPT_ID}-panel .mc-head small,#${SCRIPT_ID}-panel h2,#${SCRIPT_ID}-panel h3,#${SCRIPT_ID}-panel h4,#${SCRIPT_ID}-panel summary,
+      #${SCRIPT_ID}-ready-commands-dialog .mc-ready-dialog-head small,#${SCRIPT_ID}-ready-commands-dialog h2,
+      #${SCRIPT_ID}-active-panel .mc-active-head small,#${SCRIPT_ID}-active-panel h3,#${SCRIPT_ID}-active-panel h4,#${SCRIPT_ID}-active-panel .mc-map-players>summary{
+        color:#ddd7bd;
+        text-shadow:0 1px #000
+      }
+      #${SCRIPT_ID}-panel .mc-rank{
+        border-color:rgba(122,151,85,.65);
+        border-radius:3px;
+        background:rgba(41,57,31,.72);
+        color:var(--mc-green-strong)
+      }
+      #${SCRIPT_ID}-panel button,#${SCRIPT_ID}-ready-commands-dialog button,#${SCRIPT_ID}-active-panel button{
+        border-color:rgba(116,122,111,.68);
+        border-radius:2px;
+        background:linear-gradient(#4a4d46,#252723);
+        color:var(--mc-text);
+        box-shadow:inset 0 1px rgba(255,255,255,.1),inset 0 -1px rgba(0,0,0,.65);
+        text-shadow:0 1px #000
+      }
+      #${SCRIPT_ID}-panel button:hover,#${SCRIPT_ID}-ready-commands-dialog button:hover,#${SCRIPT_ID}-active-panel button:hover{
+        border-color:#9eb875;
+        background:linear-gradient(#59654a,#30382a);
+        color:#f2f0e6
+      }
+      #${SCRIPT_ID}-panel button:focus-visible,#${SCRIPT_ID}-ready-commands-dialog button:focus-visible,#${SCRIPT_ID}-active-panel button:focus-visible{
+        outline:1px solid var(--mc-gold);
+        outline-offset:1px
+      }
+      #${SCRIPT_ID}-panel button.danger,#${SCRIPT_ID}-active-panel button.danger{
+        border-color:rgba(151,75,70,.82);
+        background:linear-gradient(#633935,#3e2220);
+        color:#f0c3bd
+      }
+      #${SCRIPT_ID}-panel input,#${SCRIPT_ID}-panel textarea,#${SCRIPT_ID}-panel select,#${SCRIPT_ID}-ready-commands-dialog input{
+        border-color:rgba(111,116,106,.68);
+        border-radius:2px;
+        background:rgba(5,6,5,.72);
+        color:#eeeae0;
+        box-shadow:inset 0 1px 3px rgba(0,0,0,.72)
+      }
+      #${SCRIPT_ID}-panel input:focus,#${SCRIPT_ID}-panel textarea:focus,#${SCRIPT_ID}-panel select:focus,#${SCRIPT_ID}-ready-commands-dialog input:focus{
+        border-color:var(--mc-green);
+        box-shadow:inset 0 1px 3px rgba(0,0,0,.72),0 0 0 1px rgba(143,173,98,.18)
+      }
+      #${SCRIPT_ID}-panel input[type="checkbox"]{accent-color:var(--mc-green)}
+      #${SCRIPT_ID}-panel label,#${SCRIPT_ID}-ready-commands-dialog label{color:#cbc8b9}
+      #${SCRIPT_ID}-panel .mc-selected,#${SCRIPT_ID}-panel .mc-account-result-head,#${SCRIPT_ID}-panel .mc-account-batch span,
+      #${SCRIPT_ID}-ready-commands-dialog .mc-ready-dialog-head p,#${SCRIPT_ID}-ready-commands-dialog .mc-ready-dialog-help,
+      #${SCRIPT_ID}-active-panel .mc-participant-actions span{color:var(--mc-muted)}
+      #${SCRIPT_ID}-panel .mc-note{
+        border-color:var(--mc-gold);
+        background:rgba(83,72,37,.24);
+        color:#c9c2a7
+      }
+      #${SCRIPT_ID}-panel .mc-box,#${SCRIPT_ID}-panel .mc-block,#${SCRIPT_ID}-panel .mc-active-line,#${SCRIPT_ID}-panel .mc-session-grid article,
+      #${SCRIPT_ID}-active-panel .mc-session-grid article,#${SCRIPT_ID}-active-panel .mc-participants,#${SCRIPT_ID}-active-panel .mc-map-players{
+        border-color:var(--mc-border-soft);
+        background:var(--mc-surface)
+      }
+      #${SCRIPT_ID}-panel .mc-participants,#${SCRIPT_ID}-panel .mc-map-players,#${SCRIPT_ID}-panel .mc-timeline-head,#${SCRIPT_ID}-panel .mc-journal-toolbar{border-color:var(--mc-border-soft)}
+      #${SCRIPT_ID}-panel .mc-search-results,#${SCRIPT_ID}-panel .mc-auto-account-list,#${SCRIPT_ID}-panel .mc-character,#${SCRIPT_ID}-panel .mc-account-result-head,
+      #${SCRIPT_ID}-panel .mc-account-character,#${SCRIPT_ID}-panel .mc-ready-row,#${SCRIPT_ID}-panel .mc-participant,#${SCRIPT_ID}-panel .mc-timeline-events article,
+      #${SCRIPT_ID}-active-panel .mc-participant-session{border-color:var(--mc-border-soft)}
+      #${SCRIPT_ID}-panel .mc-account-character:hover{background:rgba(73,84,62,.42)}
+      #${SCRIPT_ID}-panel .mc-account-batch,#${SCRIPT_ID}-panel .mc-journal-toolbar{background:var(--mc-surface-strong)}
+      #${SCRIPT_ID}-panel .mc-ready-row code,#${SCRIPT_ID}-panel .mc-ready-row small,#${SCRIPT_ID}-panel .mc-timeline-head b,
+      #${SCRIPT_ID}-ready-commands-dialog .mc-ready-dialog-command span{color:var(--mc-green-strong)}
+      #${SCRIPT_ID}-panel .mc-command-tabs button.active{border-color:var(--mc-green);background:rgba(68,83,52,.58);color:var(--mc-green-strong)}
+      #${SCRIPT_ID}-panel .mc-session-grid small,#${SCRIPT_ID}-panel .mc-participant small,#${SCRIPT_ID}-panel .mc-timeline-events small,#${SCRIPT_ID}-panel time,
+      #${SCRIPT_ID}-ready-commands-dialog .mc-ready-dialog-command small,#${SCRIPT_ID}-active-panel .mc-session-grid small{color:var(--mc-muted)}
+      #${SCRIPT_ID}-panel summary b{color:#aaa793}
+      #${SCRIPT_ID}-active-panel .mc-participant-session.selected-target{
+        outline-color:var(--mc-green);
+        background:rgba(68,83,52,.46)
+      }
+      #${SCRIPT_ID}-ready-commands-dialog .mc-ready-dialog-empty{border-color:var(--mc-border-soft);background:var(--mc-surface-strong);color:var(--mc-muted)}
+      #${SCRIPT_ID}-notice{
+        border-color:var(--mc-border);
+        border-radius:3px;
+        background:rgba(17,18,16,.92);
+        color:var(--mc-text);
+        box-shadow:inset 0 0 0 1px #090a08,0 5px 18px rgba(0,0,0,.72)
+      }
       @media(max-width:760px){#${SCRIPT_ID}-panel .mc-command-tabs{grid-template-columns:1fr}#${SCRIPT_ID}-panel .mc-command-fields{grid-template-columns:1fr 1fr}#${SCRIPT_ID}-panel .mc-command-fields .wide{grid-column:1/-1}#${SCRIPT_ID}-panel .mc-ready-editor{grid-template-columns:1fr}#${SCRIPT_ID}-panel .mc-session-grid,#${SCRIPT_ID}-active-panel .mc-session-grid{grid-template-columns:1fr 1fr}#${SCRIPT_ID}-active-panel .mc-active-window{left:12px}#${SCRIPT_ID}-ready-commands-dialog .mc-ready-dialog-fields{grid-template-columns:1fr}}
     `;
     document.head.appendChild(style);
@@ -2900,5 +2943,5 @@
     return Math.min(maximum, Math.max(minimum, value));
   }
 
-  console.info("[Centrum Moderacji] v3.3.52 gotowe .");
+  console.info("[Centrum Moderacji] v3.3.58 gotowe.");
 })();
