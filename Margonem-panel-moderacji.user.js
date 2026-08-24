@@ -28,7 +28,7 @@
 
   const RUNTIME_GUARD = "__MARGO_MODERATION_CENTER_RUNTIME__";
   if (window[RUNTIME_GUARD]) return;
-  window[RUNTIME_GUARD] = "3.3.52";
+  window[RUNTIME_GUARD] = "3.3.53";
 
   const SCRIPT_ID = "margo-moderation-center";
   const LOCAL_DATABASE_KEY = `${SCRIPT_ID}:local-database:v1`;
@@ -45,6 +45,7 @@
   const DEFAULT_CONFIGURATION_MIGRATION_KEY = `${SCRIPT_ID}:default-configuration:2026-08-24-v2`;
   const WIDGET_KEY = "MARGO_MODERATION_CENTER";
   const NATIVE_MENU_HOOK_MARK = "__margoModerationCenterPlayerMenuHook__";
+  const POPUP_MENU_HOOK_MARK = "__margoModerationCenterPopupMenuHook__";
   const DEFAULT_START_CONFIG = {
     local: "Witam, rozpoczynam weryfikację gracza: {nick}.",
     console: '.reminder "{nick}" "Rozpoczynam weryfikację. Polecenie weryfikacyjne: Proszę o przesłanie linku do zrzutu ekranu z widocznym oknem gry oraz otwartym poleceniem na moją aktualną Postać poprzez Czat prywatny w Grze."',
@@ -2286,8 +2287,43 @@
 
   function startNativePlayerMenuIntegration() {
     installNativePlayerMenuHook();
+    installPopupMenuHook();
     clearInterval(state.nativeMenuHookTimer);
-    state.nativeMenuHookTimer = setInterval(installNativePlayerMenuHook, 1000);
+    state.nativeMenuHookTimer = setInterval(() => {
+      installNativePlayerMenuHook();
+      installPopupMenuHook();
+    }, 1000);
+  }
+
+  function installPopupMenuHook() {
+    const gameInterface = getEngine()?.interface;
+    const current = gameInterface?.showPopupMenu;
+    if (!gameInterface || typeof current !== "function") return false;
+    if (current[POPUP_MENU_HOOK_MARK]) return true;
+    const original = current;
+    const wrapped = function(menu, position, options, ...rest) {
+      appendCopyIdToPopupMenu(menu, options);
+      return original.apply(this, [menu, position, options, ...rest]);
+    };
+    Object.defineProperty(wrapped, POPUP_MENU_HOOK_MARK, { value: true });
+    Object.defineProperty(wrapped, "originalFunction", { value: original });
+    try {
+      gameInterface.showPopupMenu = wrapped;
+      return gameInterface.showPopupMenu === wrapped;
+    } catch {
+      return false;
+    }
+  }
+
+  function appendCopyIdToPopupMenu(menu, options) {
+    if (!Array.isArray(menu)) return;
+    const label = "KOPIUJ ID";
+    if (menu.some(entry => Array.isArray(entry) && normalize(entry[0]) === label)) return;
+    const nick = normalize(options?.header);
+    if (!isLikelyPlayerNick(nick) || sameNick(nick, getCurrentCharacterNick())) return;
+    const accountId = captureAccountIdFromProfileMenu(menu, null);
+    if (!accountId) return;
+    menu.push([label, () => copyPlayerAccountIdToModerationCenter({ nick, accountId })]);
   }
 
   function installNativePlayerMenuHook() {
@@ -2329,6 +2365,11 @@
     player.accountId ||= captureAccountIdFromProfileMenu(menu, player.id);
     if (!player.nick || sameNick(player.nick, getCurrentCharacterNick())) return;
 
+    const copyIdLabel = "KOPIUJ ID";
+    if (!menu.some(entry => Array.isArray(entry) && normalize(entry[0]) === copyIdLabel)) {
+      menu.push([copyIdLabel, () => copyPlayerAccountIdToModerationCenter(player)]);
+    }
+
     const active = state.active?.verification?.status === "ACTIVE";
     const label = active ? "Dodaj do aktywnej weryfikacji" : "Rozpocznij weryfikację";
     if (menu.some(entry => Array.isArray(entry) && normalize(entry[0]) === label)) return;
@@ -2348,6 +2389,35 @@
       if (hasActiveVerification) addParticipant(currentPlayer);
       else startVerification(currentPlayer);
     }]);
+  }
+
+  async function copyPlayerAccountIdToModerationCenter(player) {
+    const refreshedPlayer = nativeMenuPlayer(player?.id, player?.nick);
+    const accountId = profileAccountId(
+      refreshedPlayer.accountId || player?.accountId || getPlayerAccountId(refreshedPlayer.id || player?.id)
+    );
+    if (!accountId) {
+      notice(`Nie udało się odczytać ID konta gracza ${player?.nick || "—"}.`);
+      return false;
+    }
+    if (!state.panel) showPanel({
+      nick: refreshedPlayer.nick || player?.nick,
+      id: refreshedPlayer.id || player?.id
+    });
+    const input = state.panel?.querySelector("[data-search]");
+    const panelWindow = state.panel?.querySelector(".mc-window");
+    if (input) {
+      input.value = accountId;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.focus();
+    }
+    state.accountSearchId = accountId;
+    panelWindow?.scrollTo({ top: 0, behavior: "smooth" });
+    try {
+      await navigator.clipboard?.writeText?.(accountId);
+    } catch {}
+    notice(`ID konta ${accountId} gracza ${refreshedPlayer.nick || player?.nick} wpisano do Centrum Moderacji.`);
+    return true;
   }
 
   function captureAccountIdFromProfileMenu(menu, characterId) {
