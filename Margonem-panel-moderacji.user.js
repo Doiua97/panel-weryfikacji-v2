@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Margonem — Centrum Moderacji v2
 // @namespace    https://github.com/Doiua97/panel-moderacji-weryfikacji
-// @version      3.3.58
+// @version      3.3.62
 // @description  Lokalne centrum moderacji i dokumentowania weryfikacji w Margonem.
 // @author       Doiua
 // @match        https://*.margonem.pl/*
@@ -28,7 +28,7 @@
 
   const RUNTIME_GUARD = "__MARGO_MODERATION_CENTER_RUNTIME__";
   if (window[RUNTIME_GUARD]) return;
-  window[RUNTIME_GUARD] = "3.3.58";
+  window[RUNTIME_GUARD] = "3.3.62";
 
   const SCRIPT_ID = "margo-moderation-center";
   const LOCAL_DATABASE_KEY = `${SCRIPT_ID}:local-database:v1`;
@@ -47,6 +47,7 @@
   const POPUP_MENU_HOOK_MARK = "__margoModerationCenterPopupMenuHook__";
   const DEFAULT_START_CONFIG = {
     local: "Witam, rozpoczynam weryfikację gracza: {nick}.",
+    startDelaySeconds: 0,
     console: '.reminder "{nick}" "Rozpoczynam weryfikację. Polecenie weryfikacyjne: Proszę o przesłanie linku do zrzutu ekranu z widocznym oknem gry oraz otwartym poleceniem na moją aktualną Postać poprzez Czat prywatny w Grze."',
     sendCode: '.reminder "{nick}" "Polecenie weryfikacyjne: Proszę o wiadomość zawierającą kod: {kod} na moją aktualną Postać poprzez Czat prywatny w Grze."',
     sendNick: '.reminder "{nick}" "Polecenie weryfikacyjne: Proszę o przesłanie swojego nicku z gry na moją aktualną Postać poprzez Czat prywatny w Grze."',
@@ -67,6 +68,8 @@
     nativeMenuHookTimer: 0,
     pollTimer: 0,
     ticker: 0,
+    databaseSnapshot: "",
+    activePanelRenderSignature: "",
     panel: null,
     activePanel: null,
     journal: []
@@ -190,9 +193,8 @@
     return localDetails(record);
   }
 
-  function getLocalActiveVerification() {
+  function getLocalActiveVerification(database = readLocalDatabase()) {
     const world = normalizeWorldName(currentWorldName());
-    const database = readLocalDatabase();
     const record = [...database.verifications].reverse().find(item =>
       item?.verification?.status === "ACTIVE" &&
       normalizeWorldName(item.verification.world) === world
@@ -200,13 +202,9 @@
     return localDetails(record);
   }
 
-  function getLocalVerification(verificationId) {
-    return localDetails(findLocalRecord(readLocalDatabase(), verificationId));
-  }
-
-  function getLocalJournal(limit = 20) {
+  function getLocalJournal(limit = 20, database = readLocalDatabase()) {
     const world = normalizeWorldName(currentWorldName());
-    return readLocalDatabase().verifications
+    return database.verifications
       .filter(record => normalizeWorldName(record?.verification?.world) === world)
       .slice(-limit)
       .reverse()
@@ -291,7 +289,9 @@
     refreshActive();
     clearInterval(state.pollTimer);
     state.pollTimer = setInterval(() => {
-      refreshActive();
+      const databaseSnapshot = localStorage.getItem(LOCAL_DATABASE_KEY) || "";
+      if (databaseSnapshot !== state.databaseSnapshot) refreshActive();
+      else if (state.activePanel) renderActivePanel();
       checkPendingAccountVerification();
     }, 1000);
     clearInterval(state.ticker);
@@ -307,23 +307,16 @@
   }
 
   function refreshActive() {
-    const details = getLocalActiveVerification();
+    const database = readLocalDatabase();
+    state.databaseSnapshot = localStorage.getItem(LOCAL_DATABASE_KEY) || "";
+    const details = getLocalActiveVerification(database);
     state.active = details;
-    state.journal = getLocalJournal();
+    state.journal = getLocalJournal(20, database);
     renderActiveSections();
     if (details?.verification?.status === "ACTIVE" && localStorage.getItem(ACTIVE_PANEL_OPEN_KEY) === "1") {
       showActivePanel();
     }
     return details;
-  }
-
-  function refreshActiveById() {
-    const id = state.active?.verification?.id;
-    if (!id) return refreshActive();
-    state.active = getLocalVerification(id);
-    if (!state.active) return refreshActive();
-    renderActiveSections();
-    return state.active;
   }
 
   function createLauncher() {
@@ -405,7 +398,7 @@
       try {
         if (predicate()) return true;
       } catch {}
-      await new Promise(resolve => setTimeout(resolve, interval));
+      await wait(interval);
     }
     return false;
   }
@@ -527,7 +520,10 @@
         <details class="mc-block">
           <summary>Polecenia weryfikacyjne <b>ZAPIS LOKALNY</b></summary>
           <p>Pierwsza wiadomość trafia na czat lokalny, a następnie polecenie do konsoli. Sesję rozpoczynasz przez PPM na graczu.</p>
-          <label>Wiadomość lokalna<textarea data-start-local>${escapeMarkup(start.local)}</textarea></label>
+          <div class="mc-start-local-row">
+            <label>Wiadomość lokalna<textarea data-start-local>${escapeMarkup(start.local)}</textarea></label>
+            <label class="mc-start-delay">Opóźnienie wiadomości (s)<input type="number" min="0" step="0.1" inputmode="decimal" data-start-delay value="${escapeAttribute(start.startDelaySeconds)}"></label>
+          </div>
           <label>Komenda konsoli<textarea data-start-console>${escapeMarkup(start.console)}</textarea></label>
           <label>Polecenie „Wyślij kod”<textarea data-send-code-command>${escapeMarkup(start.sendCode)}</textarea></label>
           <p>W poleceniu „Wyślij kod” użyj <code>{nick}</code> oraz <code>{kod}</code>. Kod zostanie zastąpiony osobnym kodem wybranego uczestnika.</p>
@@ -588,6 +584,7 @@
     });
     overlay.querySelectorAll([
       "[data-start-local]",
+      "[data-start-delay]",
       "[data-start-console]",
       "[data-send-code-command]",
       "[data-send-nick-command]",
@@ -732,40 +729,6 @@
     };
   }
 
-  async function randomizeVerificationCode() {
-    const code = generateCode();
-    const input = state.panel?.querySelector("[data-code]");
-    if (input) input.value = code;
-    const verification = state.active?.verification;
-    if (!verification || verification.status !== "ACTIVE") {
-      notice(`Wylosowano kod roboczy ${code}. Rozpoczęcie weryfikacji przez PPM utworzy nowy kod sesji.`);
-      return;
-    }
-    const participant = findParticipant(state.selected.nick);
-    if (!participant || participant.resolved_at) {
-      notice("Wybierz aktywnego uczestnika, któremu chcesz przypisać kod.");
-      return;
-    }
-    const map = currentMap();
-    state.active = mutateLocalVerification(verification.id, (record, database) => {
-      const stored = (record.participants || []).find(item => String(item.id) === String(participant.id));
-      if (!stored || stored.resolved_at) throw new Error("PARTICIPANT_NOT_ACTIVE");
-      stored.verification_code = code;
-      stored.code_updated_at = new Date().toISOString();
-      record.verification.updated_at = new Date().toISOString();
-      addLocalEvent(database, record, {
-        title: `Wylosowano nowy kod dla ${stored.character_name}`,
-        eventType: "CODE_GENERATED",
-        details: { code, moderator: getCurrentCharacterNick(), characterName: stored.character_name },
-        mapId: map.id,
-        mapName: map.name,
-        participantId: stored.id
-      });
-    });
-    renderActiveSections();
-    notice(`Nowy kod gracza ${participant.character_name}: ${code}.`);
-  }
-
   function resolveTemplate(content, additions = {}) {
     const values = { ...panelValues(), ...additions };
     const missing = [];
@@ -817,7 +780,7 @@
       sentCommands.push({ label, command, nick: values.nick });
       await recordCommand(label, command, "CONSOLE", values.nick);
       if (Number(options.delayMs) > 0 && targetIndex < targets.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, Number(options.delayMs)));
+        await wait(options.delayMs);
       }
     }
     if (sentCommands.length) {
@@ -1326,6 +1289,7 @@
     const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
     return {
       local: typeof source.local === "string" ? source.local : DEFAULT_START_CONFIG.local,
+      startDelaySeconds: Math.max(0, Number.isFinite(Number(source.startDelaySeconds)) ? Number(source.startDelaySeconds) : DEFAULT_START_CONFIG.startDelaySeconds),
       console: typeof source.console === "string" ? source.console : DEFAULT_START_CONFIG.console,
       sendCode: typeof source.sendCode === "string" ? source.sendCode : DEFAULT_START_CONFIG.sendCode,
       sendNick: typeof source.sendNick === "string" ? source.sendNick : DEFAULT_START_CONFIG.sendNick,
@@ -1355,6 +1319,7 @@
     if (!root) return readStartConfig();
     return {
       local: root.querySelector("[data-start-local]")?.value.trim() ?? "",
+      startDelaySeconds: Number(root.querySelector("[data-start-delay]")?.value || 0),
       console: root.querySelector("[data-start-console]")?.value.trim() ?? "",
       sendCode: root.querySelector("[data-send-code-command]")?.value.trim() ?? "",
       sendNick: root.querySelector("[data-send-nick-command]")?.value.trim() ?? "",
@@ -1373,6 +1338,7 @@
       const saved = writeStartConfig(expected);
       const fields = {
         local: "[data-start-local]",
+        startDelaySeconds: "[data-start-delay]",
         console: "[data-start-console]",
         sendCode: "[data-send-code-command]",
         sendNick: "[data-send-nick-command]",
@@ -1427,6 +1393,12 @@
   function findParticipant(nick) {
     const wanted = normalize(nick).toLocaleLowerCase("pl");
     return state.active?.participants?.find(item => normalize(item.character_name).toLocaleLowerCase("pl") === wanted) || null;
+  }
+
+  function findActiveParticipantById(participantId, participants = state.active?.participants) {
+    return (participants || []).find(item =>
+      String(item.id) === String(participantId) && !item.resolved_at
+    ) || null;
   }
 
   function participantStartedAt(participant, verification = state.active?.verification) {
@@ -1518,6 +1490,7 @@
       </div>`;
     document.body.appendChild(overlay);
     state.activePanel = overlay;
+    state.activePanelRenderSignature = "";
     localStorage.setItem(ACTIVE_PANEL_OPEN_KEY, "1");
     const win = overlay.querySelector(".mc-active-window");
     const head = overlay.querySelector(".mc-active-head");
@@ -1534,6 +1507,7 @@
   function closeActivePanel(clearPreference = true) {
     state.activePanel?.remove();
     state.activePanel = null;
+    state.activePanelRenderSignature = "";
     if (clearPreference) localStorage.setItem(ACTIVE_PANEL_OPEN_KEY, "0");
     syncActivePanelButtonLabel();
   }
@@ -1555,6 +1529,25 @@
     const selectedNames = selectedPlayers().map(item => item.nick);
     const targetNames = unresolved.map(item => item.character_name).join(", ") || verification.target_character || "—";
     const mapPlayersCollapsed = localStorage.getItem(ACTIVE_MAP_PLAYERS_COLLAPSED_KEY) === "1";
+    const renderSignature = JSON.stringify({
+      verification: [verification.id, verification.status, verification.updated_at],
+      participants: participants.map(item => [
+        item.id,
+        item.character_name,
+        item.character_id,
+        item.account_id,
+        item.verification_code,
+        item.started_at,
+        item.start_map_name,
+        item.resolved_at
+      ]),
+      selectedNames,
+      map: [map.id, map.name],
+      onMap: onMap.map(player => [player.id, player.nick, player.accountId]),
+      mapPlayersCollapsed
+    });
+    if (renderSignature === state.activePanelRenderSignature) return;
+    state.activePanelRenderSignature = renderSignature;
     root.querySelector("[data-active-panel-title]").textContent = targetNames;
     root.querySelector("[data-active-panel-body]").innerHTML = `
       <section class="mc-participants">
@@ -1666,24 +1659,6 @@
     root.querySelectorAll("[data-finish-participant]").forEach(button => button.addEventListener("click", async () => {
       await finishParticipantVerification(button.dataset.finishParticipant);
     }));
-  }
-
-  function timelineMarkup(details) {
-    const verification = details.verification;
-    const events = details.events || [];
-    return `
-      <div class="mc-timeline-head">
-        <strong>${escapeMarkup((details.participants || []).map(item => item.character_name).join(", "))}</strong>
-        <span>${formatDate(verification.started_at)}</span>
-        <span data-live-duration>${formatDuration(Date.now() - new Date(verification.started_at).getTime())}</span>
-        <b>AKTYWNA</b>
-      </div>
-      <div class="mc-timeline-events">${events.map(event => `
-        <article>
-          <div><strong>${escapeMarkup(eventTitle(event))}</strong><time>${formatDate(event.occurred_at)}</time></div>
-          ${eventDescription(event) ? `<p>${escapeMarkup(eventDescription(event))}</p>` : ""}
-          <small>${escapeMarkup([event.details?.channel, event.map_name].filter(Boolean).join(" · "))}</small>
-        </article>`).join("") || "<p>Brak zdarzeń.</p>"}</div>`;
   }
 
   function localJournalMarkup(entries) {
@@ -1811,6 +1786,7 @@
   }
 
   function updateLiveTime() {
+    if (document.visibilityState === "hidden" || (!state.panel && !state.activePanel)) return;
     const startedAt = state.active?.verification?.started_at;
     const value = startedAt
       ? formatDuration(Date.now() - new Date(startedAt).getTime())
@@ -1823,13 +1799,10 @@
         const startedAt = new Date(element.dataset.participantStartedAt || "").getTime();
         if (Number.isFinite(startedAt)) element.textContent = formatDuration(Date.now() - startedAt);
       });
-      root.querySelectorAll("[data-journal-duration]").forEach(element => {
+      root.querySelectorAll('[data-journal-duration][data-ended-at=""]').forEach(element => {
         const journalStartedAt = new Date(element.dataset.startedAt || "").getTime();
-        const journalEndedAt = new Date(element.dataset.endedAt || "").getTime();
         if (!Number.isFinite(journalStartedAt)) return;
-        element.textContent = formatDuration(
-          Math.max(0, (Number.isFinite(journalEndedAt) ? journalEndedAt : Date.now()) - journalStartedAt)
-        );
+        element.textContent = formatDuration(Math.max(0, Date.now() - journalStartedAt));
       });
     });
   }
@@ -1852,6 +1825,7 @@
     if (local.missing.length || consoleCommand.missing.length) {
       return notice(`Treść rozpoczęcia wymaga danych: ${[...new Set([...local.missing, ...consoleCommand.missing])].join(", ")}.`);
     }
+    await wait(config.startDelaySeconds * 1000);
     const localResult = await sendLocalChatMessage(local.content);
     if (!localResult) return notice("Nie udało się wysłać obowiązkowej informacji na czat lokalny. Sesja nie została utworzona.");
     try {
@@ -1869,6 +1843,7 @@
         y: player.y
       });
       await recordCommand("ROZPOCZĘCIE — CZAT LOKALNY", local.content, "LOCAL", nick);
+      await wait(config.startDelaySeconds * 1000);
       if (sendViaGameConsole(consoleCommand.content)) {
         await recordCommand("ROZPOCZĘCIE — UPOMNIENIE", consoleCommand.content, "CONSOLE", nick);
       }
@@ -1908,6 +1883,7 @@
     if (local.missing.length || consoleCommand.missing.length) {
       return notice(`Treść rozpoczęcia wymaga danych: ${[...new Set([...local.missing, ...consoleCommand.missing])].join(", ")}.`);
     }
+    await wait(config.startDelaySeconds * 1000);
     const localResult = await sendLocalChatMessage(local.content);
     if (!localResult) {
       return notice("Nie udało się wysłać obowiązkowej informacji na czat lokalny. Gracz nie został dodany.");
@@ -1941,6 +1917,7 @@
         });
       });
       await recordCommand("DOŁĄCZENIE DO WERYFIKACJI — CZAT LOKALNY", local.content, "LOCAL", nick);
+      await wait(config.startDelaySeconds * 1000);
       if (sendViaGameConsole(consoleCommand.content)) {
         await recordCommand("DOŁĄCZENIE DO WERYFIKACJI — UPOMNIENIE", consoleCommand.content, "CONSOLE", nick);
       } else {
@@ -1996,17 +1973,13 @@
   async function sendNewVerificationCode(participantId) {
     const verification = state.active?.verification;
     if (!verification || verification.status !== "ACTIVE") return notice("Brak aktywnej weryfikacji.");
-    const participant = (state.active.participants || []).find(item =>
-      String(item.id) === String(participantId) && !item.resolved_at
-    );
+    const participant = findActiveParticipantById(participantId);
     if (!participant) return notice("Ten uczestnik nie ma aktywnej weryfikacji.");
     const code = generateCode();
     const map = currentMap();
     try {
       state.active = mutateLocalVerification(verification.id, (record, database) => {
-        const stored = (record.participants || []).find(item =>
-          String(item.id) === String(participantId) && !item.resolved_at
-        );
+        const stored = findActiveParticipantById(participantId, record.participants);
         if (!stored) throw new Error("PARTICIPANT_NOT_ACTIVE");
         stored.verification_code = code;
         stored.code_updated_at = new Date().toISOString();
@@ -2047,9 +2020,7 @@
   async function sendParticipantConfiguredCommand(participantId, commandKey) {
     const verification = state.active?.verification;
     if (!verification || verification.status !== "ACTIVE") return notice("Brak aktywnej weryfikacji.");
-    const participant = (state.active.participants || []).find(item =>
-      String(item.id) === String(participantId) && !item.resolved_at
-    );
+    const participant = findActiveParticipantById(participantId);
     if (!participant) return notice("Ten uczestnik nie ma aktywnej weryfikacji.");
     const definitions = {
       sendNick: { label: "WYŚLIJ NICK" },
@@ -2083,9 +2054,7 @@
   async function finishParticipantVerification(participantId) {
     const verification = state.active?.verification;
     if (!verification || verification.status !== "ACTIVE") return notice("Brak aktywnej weryfikacji.");
-    const participant = (state.active.participants || []).find(item =>
-      String(item.id) === String(participantId) && !item.resolved_at
-    );
+    const participant = findActiveParticipantById(participantId);
     if (!participant) return notice("Ten uczestnik nie ma aktywnej weryfikacji.");
     if (!confirm(`Zakończyć weryfikację gracza ${participant.character_name}?`)) return;
     const finishTemplate = readStartConfig().finish;
@@ -2098,9 +2067,7 @@
       let finishedAll = false;
       state.active = mutateLocalVerification(verification.id, (record, database) => {
         const endedAt = new Date().toISOString();
-        const stored = (record.participants || []).find(item =>
-          String(item.id) === String(participantId) && !item.resolved_at
-        );
+        const stored = findActiveParticipantById(participantId, record.participants);
         if (!stored) throw new Error("PARTICIPANT_NOT_ACTIVE");
         stored.resolved_at = endedAt;
         addLocalEvent(database, record, {
@@ -2167,9 +2134,7 @@
       state.active = mutateLocalVerification(verification.id, (record, database) => {
         const endedAt = new Date().toISOString();
         for (const { participant, content } of announcements) {
-          const stored = (record.participants || []).find(item =>
-            String(item.id) === String(participant.id) && !item.resolved_at
-          );
+          const stored = findActiveParticipantById(participant.id, record.participants);
           if (!stored) continue;
           stored.resolved_at = endedAt;
           addLocalEvent(database, record, {
@@ -2224,7 +2189,7 @@
     state.nativeMenuHookTimer = setInterval(() => {
       installNativePlayerMenuHook();
       installPopupMenuHook();
-    }, 1000);
+    }, 5000);
   }
 
   function installPopupMenuHook() {
@@ -2517,19 +2482,6 @@
     return value == null ? null : String(value);
   }
 
-  function readCurrentCharacter() {
-    const engine = getEngine();
-    const page = getPageWindow();
-    const hero = engine?.hero;
-    const data = hero?.d || hero || page.hero?.d || page.hero || page.g?.hero || {};
-    return {
-      nick: getCurrentCharacterNick(),
-      id: getCurrentCharacterId(),
-      accountId: readAccountId(data, hero),
-      level: finiteOrNull(data.lvl ?? data.level ?? (typeof hero?.getLvl === "function" ? hero.getLvl() : null))
-    };
-  }
-
   function getCurrentCharacterNick() {
     const engine = getEngine();
     const page = getPageWindow();
@@ -2605,7 +2557,7 @@
         key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true
       }));
     }
-    await new Promise(resolve => setTimeout(resolve, 180));
+    await wait(180);
     return normalize(readInputValue(input)) !== normalize(message);
   }
 
@@ -2665,6 +2617,7 @@
       #${SCRIPT_ID}-panel input:focus,#${SCRIPT_ID}-panel textarea:focus,#${SCRIPT_ID}-panel select:focus{border-color:#b79b4d}
       #${SCRIPT_ID}-panel .mc-selected{margin:9px 0;color:#c0b596}#${SCRIPT_ID}-panel .mc-search{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px}#${SCRIPT_ID}-panel .mc-note{padding:7px;border-left:3px solid #c6a641;background:#151610;color:#9e967e}
       #${SCRIPT_ID}-panel label{display:grid;gap:4px;color:#d4c68e}#${SCRIPT_ID}-panel label.wide{min-width:0}
+      #${SCRIPT_ID}-panel .mc-start-local-row{display:grid;grid-template-columns:minmax(0,1fr) 112px;align-items:end;gap:7px}#${SCRIPT_ID}-panel .mc-start-delay{align-self:stretch}#${SCRIPT_ID}-panel .mc-start-delay input{height:100%;min-height:55px;text-align:center}
       #${SCRIPT_ID}-panel .mc-command-tabs{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:9px}#${SCRIPT_ID}-panel .mc-command-tabs button{text-align:left}#${SCRIPT_ID}-panel .mc-command-tabs button.active{border-color:#61cbd0;background:#1d3850;color:#68ded9}#${SCRIPT_ID}-panel .mc-command-panes [data-command-section][hidden]{display:none!important}#${SCRIPT_ID}-panel .mc-command-panes .mc-box{margin-top:7px}#${SCRIPT_ID}-panel .mc-box,#${SCRIPT_ID}-panel .mc-block{margin-top:9px;padding:9px;border:1px solid #554825;border-radius:3px;background:#1d1b16}
       #${SCRIPT_ID}-panel h3,#${SCRIPT_ID}-panel h4{margin:0 0 8px;color:#e4c85f}#${SCRIPT_ID}-panel .mc-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}#${SCRIPT_ID}-panel .mc-actions button{text-align:left}
       #${SCRIPT_ID}-panel summary{display:flex;justify-content:space-between;gap:10px;color:#e6cc67;font-weight:bold;cursor:pointer;list-style:none}#${SCRIPT_ID}-panel summary b{color:#938a70;font-size:10px}#${SCRIPT_ID}-panel summary::-webkit-details-marker{display:none}
@@ -2943,5 +2896,10 @@
     return Math.min(maximum, Math.max(minimum, value));
   }
 
-  console.info("[Centrum Moderacji] v3.3.58 gotowe.");
+  function wait(milliseconds) {
+    const duration = Math.max(0, Number(milliseconds) || 0);
+    return duration ? new Promise(resolve => setTimeout(resolve, duration)) : Promise.resolve();
+  }
+
+  console.info("[Centrum Moderacji] v3.3.62 gotowe.");
 })();
