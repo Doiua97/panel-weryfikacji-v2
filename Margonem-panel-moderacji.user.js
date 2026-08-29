@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Margonem — Centrum Moderacji v2
 // @namespace    https://github.com/Doiua97/panel-moderacji-weryfikacji
-// @version      3.4.7
+// @version      3.4.8
 // @description  Lokalne centrum moderacji i dokumentowania weryfikacji w Margonem.
 // @author       Doiua
 // @match        https://*.margonem.pl/*
@@ -28,7 +28,7 @@
 
   const RUNTIME_GUARD = "__MARGO_MODERATION_CENTER_RUNTIME__";
   if (window[RUNTIME_GUARD]) return;
-  window[RUNTIME_GUARD] = "3.4.7";
+  window[RUNTIME_GUARD] = "3.4.8";
 
   const SCRIPT_ID = "margo-moderation-center";
   const LOCAL_DATABASE_KEY = `${SCRIPT_ID}:local-database:v1`;
@@ -61,8 +61,7 @@
     selected: { nick: "", id: "" },
     selectedPlayers: [],
     active: null,
-    accountCharacters: [],
-    accountSearchId: "",
+    accountGroups: [],
     pendingAccountVerification: [],
     pendingAccountVerificationBusy: false,
     mapPlayersCollapsed: false,
@@ -788,7 +787,6 @@
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.focus();
     }
-    state.accountSearchId = accountId;
     panelWindow?.scrollTo({ top: 0, behavior: "smooth" });
     try {
       await navigator.clipboard?.writeText?.(accountId);
@@ -813,9 +811,29 @@
     const text = String(value || "").trim();
     if (/^\d{3,12}$/.test(text)) return text;
     const profileMatch = text.match(/profile\/view,(\d{3,12})/i);
-    if (profileMatch) return profileMatch[1];
-    const legacyMatch = text.match(/[?&](?:id|user_id)=(\d{3,12})(?:&|$)/i);
-    return legacyMatch ? legacyMatch[1] : "";
+    return profileMatch ? profileMatch[1] : "";
+  }
+
+  function parseAccountIds(value) {
+    const text = String(value || "").trim();
+    if (!/[\s;]/.test(text)) {
+      const accountId = parseAccountId(text);
+      if (accountId) return [accountId];
+    }
+    const seen = new Set();
+    const accountIds = [];
+    for (const entry of text.split(/[\s;]+/)) {
+      const accountId = parseAccountId(entry);
+      const candidates = accountId
+        ? [accountId]
+        : entry.split(",").filter(Boolean).map(parseAccountId);
+      for (const candidate of candidates) {
+        if (!candidate || seen.has(candidate)) continue;
+        seen.add(candidate);
+        accountIds.push(candidate);
+      }
+    }
+    return accountIds;
   }
 
   function normalizePending(entry) {
@@ -991,38 +1009,45 @@
   }
 
   async function loadAccountCharacters(id) {
-    const target = state.panel?.querySelector("[data-search-results]");
-    const fetchButton = state.panel?.querySelector("[data-select-player]");
     const world = game.world();
-    state.accountSearchId = String(id || "");
+    try {
+      const html = await fetchProfile(id);
+      return excludeSelf(parseCharacters(html, world));
+    } catch (error) {
+      notice(`Nie udało się odczytać publicznego profilu konta ${id} (${error?.message || "błąd połączenia"}). Pokazano wyłącznie pasujące postacie aktualnie widoczne w kliencie.`);
+      return excludeSelf(getVisibleAccountCharacters(id, world));
+    }
+  }
+
+  async function loadAccounts(accountIds) {
+    const ids = Array.isArray(accountIds) ? accountIds : [accountIds];
+    const existing = new Set(state.accountGroups.map(group => group.accountId));
+    const fetchButton = state.panel?.querySelector("[data-select-player]");
     if (fetchButton) {
       fetchButton.disabled = true;
       fetchButton.textContent = "Pobieranie…";
     }
-    if (target) target.innerHTML = `<p>Pobieranie postaci konta ${escapeMarkup(id)} ze świata ${escapeMarkup(world)}…</p>`;
     try {
-      const html = await fetchProfile(id);
-      state.accountCharacters = excludeSelf(parseCharacters(html, world));
-      renderAccountCharacters();
-      if (!state.accountCharacters.length) {
-        target?.insertAdjacentHTML(
-          "beforeend",
-          `<p class="mc-muted">Publiczny profil nie zawiera postaci na świecie ${escapeMarkup(world)}.</p>`
-        );
+      for (const value of ids) {
+        const accountId = parseAccountId(value);
+        if (!accountId || existing.has(accountId)) continue;
+        existing.add(accountId);
+        const characters = await loadAccountCharacters(accountId);
+        state.accountGroups.push({ accountId, characters });
+        selectPlayers([
+          ...state.selectedPlayers,
+          ...characters.map(character => ({
+            nick: character.name,
+            id: character.id || resolvePlayerId(character.name) || ""
+          }))
+        ], { renderActive: true });
       }
-    } catch (error) {
-      state.accountCharacters = excludeSelf(getVisibleAccountCharacters(id, world));
-      renderAccountCharacters();
-      target?.insertAdjacentHTML(
-        "beforeend",
-        `<p class="mc-muted">Nie udało się odczytać publicznego profilu (${escapeMarkup(error?.message || "błąd połączenia")}). Pokazano wyłącznie pasujące postacie aktualnie widoczne w kliencie.</p>`
-      );
     } finally {
       if (fetchButton) {
         fetchButton.disabled = false;
         fetchButton.textContent = "Wykryj postacie";
       }
-      renderPending();
+      renderAccountCharacters();
     }
   }
 
@@ -1136,51 +1161,64 @@
     const target = state.panel?.querySelector("[data-search-results]");
     if (!target) return;
     const world = game.world();
-    state.accountCharacters = excludeSelf(state.accountCharacters);
-    if (!state.accountCharacters.length) {
-      target.innerHTML = `<p>Nie wykryto postaci na świecie ${escapeMarkup(world)}.</p>`;
+    const openIds = new Set(
+      [...target.querySelectorAll('[data-toggle-account][aria-expanded="true"]')]
+        .map(toggle => toggle.closest("[data-account-group]")?.dataset.accountId)
+        .filter(Boolean)
+    );
+    const selected = state.selectedPlayers;
+    if (!state.accountGroups.length) {
+      target.innerHTML = "";
       return;
     }
     target.innerHTML = `
-      <div class="mc-account-result-head">
-        Znaleziono ${state.accountCharacters.length} postaci konta ${escapeMarkup(state.accountSearchId)}
-        na świecie ${escapeMarkup(world)}. Zaznacz postacie, na których chcesz wykonać operację.
-      </div>
-      <div class="mc-account-character-list">
-        ${state.accountCharacters.map((character, index) => `
-          <label class="mc-account-character">
-            <input
-              type="checkbox"
-              data-account-character
-              data-character-index="${index}"
-              value="${escapeAttribute(character.name)}"
-              checked
-            >
-            <span>
-              <strong>${escapeMarkup(character.name)}</strong>
-              <small>${[
-                character.level ? `${character.level} lvl` : "",
-                character.id ? `ID postaci ${character.id}` : ""
-              ].filter(Boolean).map(escapeMarkup).join(" · ")}</small>
-            </span>
-          </label>`).join("")}
-      </div>
+      ${state.accountGroups.map(group => {
+        const expanded = openIds.has(group.accountId);
+        const highestNick = normalize(group.characters[0]?.name);
+        return `
+        <section class="mc-account-group" data-account-group data-account-id="${escapeAttribute(group.accountId)}">
+          <div class="mc-account-group-head">
+            <button type="button" data-toggle-account aria-expanded="${expanded}" aria-label="${expanded ? "Zwiń" : "Rozwiń"} konto">${expanded ? "▾" : "▸"}</button>
+            <span>Konto ${escapeMarkup(group.accountId)}</span>
+            ${highestNick ? `<span class="mc-account-group-nick">${escapeMarkup(highestNick)}</span>` : ""}
+            <button type="button" data-remove-account="${escapeAttribute(group.accountId)}" aria-label="Usuń konto">×</button>
+          </div>
+          <div class="mc-account-character-list" ${expanded ? "" : "hidden"}>
+            ${group.characters.length ? group.characters.map((character, index) => `
+              <label class="mc-account-character">
+                <input
+                  type="checkbox"
+                  data-account-character
+                  data-character-index="${index}"
+                  value="${escapeAttribute(character.name)}"
+                  ${selected.some(player => sameNick(player.nick, character.name)) ? "checked" : ""}
+                >
+                <span>
+                  <strong>${escapeMarkup(character.name)}</strong>
+                  <small>${[
+                    character.level ? `${character.level} lvl` : "",
+                    character.id ? `ID postaci ${character.id}` : ""
+                  ].filter(Boolean).map(escapeMarkup).join(" · ")}</small>
+                </span>
+              </label>`).join("") : `<p class="mc-muted">Nie wykryto postaci na świecie ${escapeMarkup(world)}.</p>`}
+          </div>
+        </section>`;
+      }).join("")}
       <div class="mc-account-batch" data-account-batch hidden>
         <span data-account-selection-count></span>
         <label class="mc-account-batch-time">Czas<input data-time placeholder="np. 12h"></label>
         <button type="button" class="danger" data-account-batch-command="kill">Zabij</button>
         <button type="button" class="danger" data-account-batch-command="unkill">Zdejmij zabicie</button>
       </div>`;
-
-    syncAccountSelection();
+    const selectionCount = selectedAccountCharacters().length;
+    target.querySelector("[data-account-selection-count]").textContent = `Zaznaczono: ${selectionCount}`;
+    target.querySelector("[data-account-batch]").hidden = selectionCount === 0;
   }
 
   function selectedAccountCharacters() {
-    const target = state.panel?.querySelector("[data-search-results]");
-    if (!target) return [];
-    return [...target.querySelectorAll("[data-account-character]:checked")]
-      .map(input => state.accountCharacters[Number(input.dataset.characterIndex)])
-      .filter(Boolean)
+    return state.accountGroups
+      .flatMap(group => group.characters)
+      .filter(character => state.selectedPlayers.some(player => sameNick(player.nick, character.name)))
       .map(character => ({
         nick: character.name,
         id: character.id || resolvePlayerId(character.name) || ""
@@ -1188,12 +1226,44 @@
   }
 
   function syncAccountSelection() {
-    const selected = selectedAccountCharacters();
-    selectPlayers(selected);
+    const target = state.panel?.querySelector("[data-search-results]");
+    if (!target) return;
+    const selected = [...target.querySelectorAll("[data-account-character]:checked")]
+      .map(input => {
+        const groupElement = input.closest("[data-account-group]");
+        const group = state.accountGroups.find(item => item.accountId === groupElement?.dataset.accountId);
+        const character = group?.characters[Number(input.dataset.characterIndex)];
+        return character && {
+          nick: character.name,
+          id: character.id || resolvePlayerId(character.name) || ""
+        };
+      })
+      .filter(Boolean);
+    selectPlayers(selected, { renderActive: true });
     const batch = state.panel?.querySelector("[data-account-batch]");
     const count = state.panel?.querySelector("[data-account-selection-count]");
     if (count) count.textContent = `Zaznaczono: ${selected.length}`;
     if (batch) batch.hidden = selected.length === 0;
+  }
+
+  function removeAccount(accountId) {
+    const group = state.accountGroups.find(item => item.accountId === String(accountId));
+    const removedNames = (group?.characters || []).map(character => character.name);
+    state.accountGroups = state.accountGroups.filter(group => group.accountId !== String(accountId));
+    selectPlayers(state.selectedPlayers.filter(player =>
+      !removedNames.some(name => sameNick(name, player.nick))
+    ), { renderActive: true });
+    renderAccountCharacters();
+  }
+
+  function clearAccountSearch() {
+    state.accountGroups = [];
+    selectPlayers([], { renderActive: true });
+    const input = state.panel?.querySelector("[data-search]");
+    const results = state.panel?.querySelector("[data-search-results]");
+    if (input) input.value = "";
+    if (results) results.innerHTML = "";
+    renderSelection();
   }
 
   async function loadAccount(player) {
@@ -1210,9 +1280,8 @@
     const input = state.panel?.querySelector("[data-search]");
     const panelWindow = state.panel?.querySelector(".mc-window");
     if (input) input.value = accountId;
-    state.accountSearchId = accountId;
     panelWindow?.scrollTo({ top: 0, behavior: "smooth" });
-    await loadAccountCharacters(accountId);
+    await loadAccounts([accountId]);
     state.panel?.querySelector("[data-search-results]")?.scrollIntoView({ block: "nearest" });
     return true;
   }
@@ -1226,6 +1295,10 @@
       notice("Nie znaleziono uczestnika aktywnej weryfikacji.");
       return;
     }
+    selectPlayers([
+      ...selectedPlayers(),
+      { nick: participant.character_name, id: participant.character_id || resolvePlayerId(participant.character_name) || "" }
+    ], { renderActive: true });
     await loadAccount({
       nick: participant.character_name,
       id: participant.character_id,
@@ -1235,15 +1308,15 @@
 
   async function searchAccount() {
     const input = state.panel?.querySelector("[data-search]");
-    const value = normalize(input?.value);
+    const value = input?.value || "";
     if (!value) return notice("Wpisz ID konta albo link do profilu.");
-    const accountId = parseAccountId(value);
-    if (!accountId) {
-      notice("Wpisz poprawne ID konta albo pełny link do profilu Margonem.");
+    const accountIds = parseAccountIds(value);
+    if (!accountIds.length) {
+      notice("Wpisz poprawne ID konta lub pełne linki do profili Margonem.");
       input?.focus();
       return;
     }
-    await loadAccountCharacters(accountId);
+    await loadAccounts(accountIds);
   }
 
   function renderSelection() {
@@ -1564,7 +1637,10 @@
       } else {
         notice(`Dodano ${nick}, ale klient nie udostępnił konsoli do wysłania .reminder.`);
       }
-      selectPlayers([{ nick, id: player.id || "" }]);
+      selectPlayers([
+        ...selectedPlayers(),
+        { nick, id: player.id || resolvePlayerId(nick) || "" }
+      ], { renderActive: true });
       await loadAccount(player);
       notice(`Dodano ${nick} do aktywnej weryfikacji. Kod gracza: ${code}.`);
     } catch (error) {
@@ -1845,7 +1921,7 @@
     bindPanel(overlay);
     renderSelection();
     renderActiveSections();
-    if (state.accountSearchId) renderAccountCharacters();
+    if (state.accountGroups.length) renderAccountCharacters();
     renderPending();
   }
 
@@ -1900,7 +1976,7 @@
           <p>Pierwsza wiadomość trafia na czat lokalny, a następnie polecenie do konsoli. Sesję rozpoczynasz przez PPM na graczu.</p>
           <div class="mc-start-local-row">
             <label>Wiadomość lokalna<textarea data-start-local>${escapeMarkup(start.local)}</textarea></label>
-            <label class="mc-start-delay">Opóźnienie wiadomości (s)<input type="number" min="0" step="0.1" inputmode="decimal" data-start-delay value="${escapeAttribute(start.startDelaySeconds)}"></label>
+            <label class="mc-start-delay">Opóźnienie wiadomości i konsoli (s)<input type="number" min="0" step="0.1" inputmode="decimal" data-start-delay value="${escapeAttribute(start.startDelaySeconds)}"></label>
           </div>
           <label>Komenda konsoli<textarea data-start-console>${escapeMarkup(start.console)}</textarea></label>
           <label>Polecenie „Wyślij kod”<textarea data-send-code-command>${escapeMarkup(start.sendCode)}</textarea></label>
@@ -1950,20 +2026,7 @@
     overlay.querySelector("[data-search]").addEventListener("keydown", event => {
       if (event.key === "Enter") searchAccount();
     });
-    if (state.accountSearchId) {
-      overlay.querySelector("[data-search]").value = state.accountSearchId;
-    }
-    overlay.querySelector("[data-clear-player]").addEventListener("click", () => {
-      selectPlayers([]);
-      state.accountCharacters = [];
-      state.accountSearchId = "";
-      const input = overlay.querySelector("[data-search]");
-      const results = overlay.querySelector("[data-search-results]");
-      if (input) input.value = "";
-      if (results) results.innerHTML = "";
-      renderSelection();
-      renderPending();
-    });
+    overlay.querySelector("[data-clear-player]").addEventListener("click", clearAccountSearch);
     overlay.querySelector("[data-save-start]").addEventListener("click", () => {
       saveConfig(overlay, true);
     });
@@ -1997,8 +2060,19 @@
       if (event.target.matches("[data-account-character]")) syncAccountSelection();
     });
     searchResults.addEventListener("click", event => {
-      const button = event.target.closest("[data-account-batch-command]");
-      if (button) void runAccountBatch(button.dataset.accountBatchCommand);
+      const batchButton = event.target.closest("[data-account-batch-command]");
+      if (batchButton) return void runAccountBatch(batchButton.dataset.accountBatchCommand);
+      const removeButton = event.target.closest("[data-remove-account]");
+      if (removeButton) return removeAccount(removeButton.dataset.removeAccount);
+      const toggle = event.target.closest("[data-toggle-account]");
+      if (toggle) {
+        const expanded = toggle.getAttribute("aria-expanded") === "true";
+        const list = toggle.closest("[data-account-group]")?.querySelector(".mc-account-character-list");
+        toggle.setAttribute("aria-expanded", String(!expanded));
+        toggle.setAttribute("aria-label", expanded ? "Rozwiń konto" : "Zwiń konto");
+        toggle.textContent = expanded ? "▸" : "▾";
+        if (list) list.hidden = expanded;
+      }
     });
     overlay.querySelector("[data-clear-journal]").addEventListener("click", clearJournal);
   }
@@ -2108,25 +2182,32 @@
         id: button.dataset.playerId,
         accountId: button.dataset.playerAccountId || null
       });
-      if (button.matches("[data-select-participant]")) {
-        const participant = findActiveParticipant(button.dataset.selectParticipant);
-        if (!participant) return;
-        const current = selectedPlayers();
-        const selected = current.some(item => sameNick(item.nick, participant.character_name));
-        selectPlayers(selected
-          ? current.filter(item => !sameNick(item.nick, participant.character_name))
-          : [...current, { nick: participant.character_name, id: participant.character_id || resolvePlayerId(participant.character_name) || "" }],
-        { renderActive: true });
-        notice(selected ? `Odznaczono gracza ${participant.character_name}.` : `Wybrano gracza ${participant.character_name}.`);
-        return;
-      }
       if (button.matches("[data-select-all-participants]")) {
         const unresolved = (state.active?.participants || []).filter(item => !item.resolved_at);
-        selectPlayers(unresolved.map(item => ({ nick: item.character_name, id: item.character_id || resolvePlayerId(item.character_name) || "" })), { renderActive: true });
-        return notice(`Wybrano wszystkich aktywnych uczestników (${unresolved.length}).`);
+        const accountIds = [];
+        const selected = [...selectedPlayers()];
+        let missing = 0;
+        for (const participant of unresolved) {
+          const accountId = parseAccountId(
+            participant.account_id || getPlayerAccountId(participant.character_id)
+          );
+          if (!accountId) {
+            missing += 1;
+            continue;
+          }
+          if (!accountIds.includes(accountId)) accountIds.push(accountId);
+          selected.push({
+            nick: participant.character_name,
+            id: participant.character_id || resolvePlayerId(participant.character_name) || ""
+          });
+        }
+        selectPlayers(selected, { renderActive: true });
+        if (missing) notice(`Nie udało się rozpoznać kont części uczestników (${missing}).`);
+        await loadAccounts(accountIds);
+        return;
       }
       if (button.matches("[data-clear-participant-selection]")) {
-        selectPlayers([], { renderActive: true });
+        clearAccountSearch();
         return notice("Wyczyszczono wybór uczestników.");
       }
       if (button.matches("[data-finish-all-participants]")) return finishAll();
@@ -2187,7 +2268,7 @@
       let row = existing.get(String(item.id));
       if (!row || row.dataset.signature !== signature) {
         const template = document.createElement("template");
-        template.innerHTML = participantMarkup(item, verification, selected, isGroupVerification);
+        template.innerHTML = participantMarkup(item, verification, selected);
         const next = template.content.firstElementChild;
         next.dataset.signature = signature;
         if (row) row.replaceWith(next);
@@ -2210,7 +2291,7 @@
     }
   }
 
-  function participantMarkup(item, verification, selected, grouped) {
+  function participantMarkup(item, verification, selected) {
     const started = participantStartedAt(item, verification);
     return `<article data-participant-row="${escapeAttribute(item.id)}" class="mc-participant-session ${item.resolved_at ? "resolved" : ""} ${selected ? "selected-target" : ""}">
       <div class="mc-session-grid">
@@ -2221,7 +2302,6 @@
         <article><small>${item.resolved_at ? "CZAS SESJI" : "CZAS TRWANIA"}</small><strong${item.resolved_at ? "" : ` data-participant-started-at="${escapeAttribute(started)}"`}>${participantDuration(item, verification)}</strong></article>
       </div>
       <div class="mc-participant-actions"><span>${item.resolved_at ? "Zakończona" : "Aktywna"}</span>${item.resolved_at ? "" : `
-        ${grouped ? `<button type="button" data-select-participant="${escapeAttribute(item.id)}" data-participant-selected="${selected ? "1" : "0"}">${selected ? "Wyczyść" : "Wybierz"}</button>` : ""}
         <button type="button" data-load-participant-account="${escapeAttribute(item.id)}" title="Otwórz w Centrum Moderacji postacie tego konta">IDKONTA</button>
         <button type="button" data-send-participant-code="${escapeAttribute(item.id)}">Kod</button>
         <button type="button" data-send-participant-command="sendNick" data-participant-id="${escapeAttribute(item.id)}">Nick</button>
@@ -2733,7 +2813,7 @@
       #${SCRIPT_ID}-panel input,#${SCRIPT_ID}-panel textarea,#${SCRIPT_ID}-panel select{width:100%;padding:8px;border:1px solid rgba(111,116,106,.68);border-radius:2px;outline:none;background:rgba(5,6,5,.72);color:#eeeae0;box-shadow:inset 0 1px 3px rgba(0,0,0,.72)}
       #${SCRIPT_ID}-active-panel .mc-participant-session.selected-target{outline:1px solid var(--mc-green);outline-offset:-1px;background:rgba(68,83,52,.46)}
       #${SCRIPT_ID}-panel input[type="checkbox"]{accent-color:var(--mc-green)}
-      #${SCRIPT_ID}-panel .mc-selected,#${SCRIPT_ID}-panel .mc-account-result-head,#${SCRIPT_ID}-panel .mc-account-batch span,
+      #${SCRIPT_ID}-panel .mc-selected,#${SCRIPT_ID}-panel .mc-account-group-head,#${SCRIPT_ID}-panel .mc-account-batch span,
       #${SCRIPT_ID}-active-panel .mc-participant-actions span{color:var(--mc-muted)}
       #${SCRIPT_ID}-panel textarea{min-height:55px;resize:vertical}
       #${SCRIPT_ID}-panel .mc-selected{margin:9px 0}
@@ -2760,7 +2840,11 @@
       #${SCRIPT_ID}-panel .mc-auto-account-toggle[aria-expanded="true"] b{transform:rotate(90deg)}
       #${SCRIPT_ID}-panel .mc-auto-account-characters{display:grid;gap:2px;padding:0 7px 7px 33px}
       #${SCRIPT_ID}-panel .mc-auto-account-characters[hidden]{display:none!important}
-      #${SCRIPT_ID}-panel .mc-account-result-head{padding:7px;border-bottom:1px solid;font-size:10px;line-height:1.35}
+      #${SCRIPT_ID}-panel .mc-account-group{display:grid;border-bottom:1px solid #4c4023}
+      #${SCRIPT_ID}-panel .mc-account-group-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 7px;font-size:10px;line-height:1.35}
+      #${SCRIPT_ID}-panel .mc-account-group-head>span:first-of-type{flex:0 0 auto}
+      #${SCRIPT_ID}-panel .mc-account-group-nick{flex:1;min-width:0;overflow:hidden;text-align:right;text-overflow:ellipsis;white-space:nowrap}
+      #${SCRIPT_ID}-panel .mc-account-group-head button{min-width:23px;padding:2px 6px}
       #${SCRIPT_ID}-panel .mc-account-character{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;padding:6px 7px;border-bottom:1px solid #4c4023;cursor:pointer}
       #${SCRIPT_ID}-panel .mc-search{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:6px}
       #${SCRIPT_ID}-panel .mc-search-results:empty{display:none}
@@ -2769,6 +2853,7 @@
       #${SCRIPT_ID}-panel .mc-auto-account-row small{color:#9fb0bd}
       #${SCRIPT_ID}-panel [data-pending-account-status]{margin:7px 0 0;line-height:1.35;overflow-wrap:anywhere}
       #${SCRIPT_ID}-panel .mc-account-character-list{display:grid}
+      #${SCRIPT_ID}-panel .mc-account-character-list[hidden]{display:none}
       #${SCRIPT_ID}-panel .mc-account-character span{display:grid;gap:2px;min-width:0}
       #${SCRIPT_ID}-panel .mc-account-character strong{overflow:hidden;color:#dce8f2;font-size:11px;text-overflow:ellipsis;white-space:nowrap}
       #${SCRIPT_ID}-panel .mc-account-character small{color:#8ea5b5;font-size:9px}
@@ -2816,7 +2901,7 @@
       #${SCRIPT_ID}-panel .mc-timeline-events article div{display:flex;justify-content:space-between;gap:8px}
       #${SCRIPT_ID}-panel .mc-timeline-events p{margin:4px 0;color:#ddd0aa}
       #${SCRIPT_ID}-panel .mc-participants,#${SCRIPT_ID}-panel .mc-map-players,#${SCRIPT_ID}-panel .mc-journal-toolbar{border-color:var(--mc-border-soft)}
-      #${SCRIPT_ID}-panel .mc-search-results,#${SCRIPT_ID}-panel .mc-auto-account-list,#${SCRIPT_ID}-panel .mc-account-result-head,
+      #${SCRIPT_ID}-panel .mc-search-results,#${SCRIPT_ID}-panel .mc-auto-account-list,#${SCRIPT_ID}-panel .mc-account-group-head,
       #${SCRIPT_ID}-panel .mc-account-character,#${SCRIPT_ID}-panel .mc-timeline-events article,
       #${SCRIPT_ID}-active-panel .mc-participant-session{border-color:var(--mc-border-soft)}
       #${SCRIPT_ID}-panel .mc-window::-webkit-scrollbar-thumb,#${SCRIPT_ID}-active-panel .mc-active-window::-webkit-scrollbar-thumb{min-height:28px;border-radius:4px;background:#858b80}
@@ -2850,5 +2935,5 @@
     delete game.page()[RUNTIME_GUARD];
   }
 
-  console.info("[Centrum Moderacji] v3.4.7 gotowe.");
+  console.info("[Centrum Moderacji] v3.4.8 gotowe.");
 })();
