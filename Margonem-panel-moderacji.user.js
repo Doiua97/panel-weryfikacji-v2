@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Margonem — Centrum Moderacji v2
 // @namespace    https://github.com/Doiua97/panel-moderacji-weryfikacji
-// @version      3.4.8
+// @version      3.4.9
 // @description  Lokalne centrum moderacji i dokumentowania weryfikacji w Margonem.
 // @author       Doiua
 // @match        https://*.margonem.pl/*
@@ -28,7 +28,7 @@
 
   const RUNTIME_GUARD = "__MARGO_MODERATION_CENTER_RUNTIME__";
   if (window[RUNTIME_GUARD]) return;
-  window[RUNTIME_GUARD] = "3.4.8";
+  window[RUNTIME_GUARD] = "3.4.9";
 
   const SCRIPT_ID = "margo-moderation-center";
   const LOCAL_DATABASE_KEY = `${SCRIPT_ID}:local-database:v1`;
@@ -39,10 +39,13 @@
   const ACTIVE_PANEL_OPEN_KEY = `${SCRIPT_ID}:active-panel-open`;
   const ACTIVE_MAP_PLAYERS_COLLAPSED_KEY = `${SCRIPT_ID}:active-map-players-collapsed`;
   const PENDING_ACCOUNT_VERIFICATION_KEY = `${SCRIPT_ID}:pending-account-verification:v1`;
+  const ACCOUNT_SEARCH_KEY = `${SCRIPT_ID}:account-search:v1`;
   const START_CONFIG_KEY = `${SCRIPT_ID}:start-config`;
   const DEFAULT_CONFIGURATION_MIGRATION_KEY = `${SCRIPT_ID}:default-configuration:2026-08-24-v2`;
   const WIDGET_KEY = "MARGO_MODERATION_CENTER";
   const NATIVE_MENU_HOOK_MARK = "__margoModerationCenterPlayerMenuHook__";
+  const WORLD_WINDOW_HOOK_MARK = "__margoModerationCenterWorldWindowHook__";
+  const PLAYERS_ONLINE_HOOK_MARK = "__margoModerationCenterPlayersOnlineHook__";
   const MAP_HOOK_MARK = "__margoModerationCenterMapHook__";
   const DATE_FORMATTER = new Intl.DateTimeFormat("pl-PL", { dateStyle: "short", timeStyle: "medium" });
   const DEFAULT_START_CONFIG = {
@@ -87,6 +90,7 @@
     operations: new Set(),
     profileCache: new Map(),
     profileRequests: new Map(),
+    accountLoadVersions: new Map(),
     confirm: null,
     initialized: false,
     dragFrame: 0
@@ -709,7 +713,14 @@
     const original = current;
     const wrapped = function(playerId, playerNick, menu, ...rest) {
       const result = original.apply(this, [playerId, playerNick, menu, ...rest]);
-      addPlayerMenuActions(menu, playerId, playerNick);
+      const other = game.other(playerId);
+      const card = game.engine()?.businessCardManager?.getCard?.(playerId);
+      const player = other ? playerData(other) : {
+        nick: normalize(card?.getNick?.() || playerNick),
+        id: String(card?.getId?.() ?? playerId ?? "") || null,
+        accountId: parseAccountId(card?.getAcc?.()) || null
+      };
+      addPlayerMenuActions(menu, player);
       return result;
     };
     Object.defineProperty(wrapped, NATIVE_MENU_HOOK_MARK, {
@@ -730,16 +741,61 @@
       runtime.cleanup.push(() => {
         if (others.addMcPanelToMenu === wrapped) others.addMcPanelToMenu = original;
       });
+      const worldWindow = game.engine()?.worldWindow;
+      const currentOpen = worldWindow?.open;
+      if (worldWindow && typeof currentOpen === "function" && !currentOpen[WORLD_WINDOW_HOOK_MARK]) {
+        const wrappedOpen = function(...args) {
+          const result = currentOpen.apply(this, args);
+          hookPlayersOnline();
+          return result;
+        };
+        Object.defineProperty(wrappedOpen, WORLD_WINDOW_HOOK_MARK, { value: true });
+        worldWindow.open = wrappedOpen;
+        runtime.cleanup.push(() => {
+          if (worldWindow.open === wrappedOpen) worldWindow.open = currentOpen;
+        });
+      }
+      hookPlayersOnline();
       return others.addMcPanelToMenu === wrapped;
     } catch {
       return false;
     }
   }
 
-  function addPlayerMenuActions(menu, playerId, playerNick) {
+  function hookPlayersOnline() {
+    const instance = game.engine()?.worldWindow?.playersOnline;
+    const current = instance?.createContextMenu;
+    if (!instance || typeof current !== "function" || current[PLAYERS_ONLINE_HOOK_MARK]) return false;
+    const wrapped = function(event, record, ...rest) {
+      const gameInterface = game.engine()?.interface;
+      const showPopupMenu = gameInterface?.showPopupMenu;
+      if (typeof showPopupMenu !== "function") return current.apply(this, [event, record, ...rest]);
+      const wrappedShowPopupMenu = function(menu, ...popupArgs) {
+        addPlayerMenuActions(menu, {
+          nick: normalize(record?.n),
+          id: String(record?.c ?? "") || null,
+          accountId: parseAccountId(record?.a) || null
+        });
+        return showPopupMenu.apply(this, [menu, ...popupArgs]);
+      };
+      gameInterface.showPopupMenu = wrappedShowPopupMenu;
+      try {
+        return current.apply(this, [event, record, ...rest]);
+      } finally {
+        if (gameInterface.showPopupMenu === wrappedShowPopupMenu) gameInterface.showPopupMenu = showPopupMenu;
+      }
+    };
+    Object.defineProperty(wrapped, PLAYERS_ONLINE_HOOK_MARK, { value: true });
+    instance.createContextMenu = wrapped;
+    runtime.cleanup.push(() => {
+      if (instance.createContextMenu === wrapped) instance.createContextMenu = current;
+    });
+    return instance.createContextMenu === wrapped;
+  }
+
+  function addPlayerMenuActions(menu, player) {
     if (!Array.isArray(menu)) return;
-    const player = menuPlayer(playerId, playerNick);
-    if (!player.nick || sameNick(player.nick, game.heroNick())) return;
+    if (!player?.nick || sameNick(player.nick, game.heroNick())) return;
 
     const copyIdLabel = "KOPIUJ ID";
     if (!menu.some(entry => Array.isArray(entry) && normalize(entry[0]) === copyIdLabel)) {
@@ -751,34 +807,25 @@
     if (menu.some(entry => Array.isArray(entry) && normalize(entry[0]) === label)) return;
 
     menu.push([label, () => {
-      const refreshedPlayer = menuPlayer(player.id, player.nick);
-      const currentPlayer = {
-        ...player,
-        ...refreshedPlayer,
-        accountId: refreshedPlayer.accountId || player.accountId || null
-      };
-      if (!currentPlayer.nick) {
+      if (!player.nick) {
         notice("Nie udało się odczytać danych wybranej postaci.");
         return;
       }
       const hasActiveVerification = state.active?.verification?.status === "ACTIVE";
-      if (hasActiveVerification) addParticipant(currentPlayer);
-      else startVerification(currentPlayer);
+      if (hasActiveVerification) addParticipant(player);
+      else startVerification(player);
     }]);
   }
 
   async function copyAccountId(player) {
-    const refreshedPlayer = menuPlayer(player?.id, player?.nick);
-    const accountId = parseAccountId(
-      refreshedPlayer.accountId || player?.accountId || getPlayerAccountId(refreshedPlayer.id || player?.id)
-    );
+    const accountId = parseAccountId(player?.accountId);
     if (!accountId) {
       notice(`Nie udało się odczytać ID konta gracza ${player?.nick || "—"}.`);
       return false;
     }
     if (!state.panel) showPanel({
-      nick: refreshedPlayer.nick || player?.nick,
-      id: refreshedPlayer.id || player?.id
+      nick: player?.nick,
+      id: player?.id
     });
     const input = state.panel?.querySelector("[data-search]");
     const panelWindow = state.panel?.querySelector(".mc-window");
@@ -791,7 +838,7 @@
     try {
       await navigator.clipboard?.writeText?.(accountId);
     } catch {}
-    notice(`ID konta ${accountId} gracza ${refreshedPlayer.nick || player?.nick} wpisano do Centrum Moderacji.`);
+    notice(`ID konta ${accountId} gracza ${player?.nick} wpisano do Centrum Moderacji.`);
     return true;
   }
 
@@ -1012,11 +1059,25 @@
     const world = game.world();
     try {
       const html = await fetchProfile(id);
-      return excludeSelf(parseCharacters(html, world));
+      return { characters: excludeSelf(parseCharacters(html, world)), profileLoaded: true };
     } catch (error) {
       notice(`Nie udało się odczytać publicznego profilu konta ${id} (${error?.message || "błąd połączenia"}). Pokazano wyłącznie pasujące postacie aktualnie widoczne w kliencie.`);
-      return excludeSelf(getVisibleAccountCharacters(id, world));
+      return { characters: excludeSelf(getVisibleAccountCharacters(id, world)), profileLoaded: false };
     }
+  }
+
+  function readAccountSearch() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(ACCOUNT_SEARCH_KEY) || "[]");
+      return [...new Set((Array.isArray(stored) ? stored : []).map(parseAccountId).filter(Boolean))];
+    } catch {
+      return [];
+    }
+  }
+
+  function writeAccountSearch(accountIds) {
+    const ids = [...new Set((Array.isArray(accountIds) ? accountIds : []).map(parseAccountId).filter(Boolean))];
+    localStorage.setItem(ACCOUNT_SEARCH_KEY, JSON.stringify(ids));
   }
 
   async function loadAccounts(accountIds) {
@@ -1032,8 +1093,11 @@
         const accountId = parseAccountId(value);
         if (!accountId || existing.has(accountId)) continue;
         existing.add(accountId);
-        const characters = await loadAccountCharacters(accountId);
+        const loadVersion = runtime.accountLoadVersions.get(accountId) || 0;
+        const { characters, profileLoaded } = await loadAccountCharacters(accountId);
+        if ((runtime.accountLoadVersions.get(accountId) || 0) !== loadVersion) continue;
         state.accountGroups.push({ accountId, characters });
+        if (profileLoaded) writeAccountSearch([...readAccountSearch(), accountId]);
         selectPlayers([
           ...state.selectedPlayers,
           ...characters.map(character => ({
@@ -1247,16 +1311,19 @@
   }
 
   function removeAccount(accountId) {
-    const group = state.accountGroups.find(item => item.accountId === String(accountId));
+    const removedAccountId = String(accountId);
+    const group = state.accountGroups.find(item => item.accountId === removedAccountId);
     const removedNames = (group?.characters || []).map(character => character.name);
-    state.accountGroups = state.accountGroups.filter(group => group.accountId !== String(accountId));
+    runtime.accountLoadVersions.set(removedAccountId, (runtime.accountLoadVersions.get(removedAccountId) || 0) + 1);
+    state.accountGroups = state.accountGroups.filter(group => group.accountId !== removedAccountId);
+    writeAccountSearch(readAccountSearch().filter(id => id !== removedAccountId));
     selectPlayers(state.selectedPlayers.filter(player =>
       !removedNames.some(name => sameNick(name, player.nick))
     ), { renderActive: true });
     renderAccountCharacters();
   }
 
-  function clearAccountSearch() {
+  function clearAccountSearchView() {
     state.accountGroups = [];
     selectPlayers([], { renderActive: true });
     const input = state.panel?.querySelector("[data-search]");
@@ -1264,6 +1331,11 @@
     if (input) input.value = "";
     if (results) results.innerHTML = "";
     renderSelection();
+  }
+
+  function clearAccountSearch() {
+    clearAccountSearchView();
+    writeAccountSearch([]);
   }
 
   async function loadAccount(player) {
@@ -1510,6 +1582,13 @@
     }
   }
 
+  async function sendDelayedLocal(message, commandName, targetNick) {
+    await wait(readConfig().startDelaySeconds * 1000);
+    const sent = await sendLocal(message);
+    if (sent) await recordCommand(commandName, message, "LOCAL", targetNick);
+    else notice(`Nie udało się wysłać opóźnionej wiadomości lokalnej do gracza ${targetNick}.`);
+  }
+
   function runOnce(key, action) {
     if (runtime.operations.has(key)) return Promise.resolve(false);
     runtime.operations.add(key);
@@ -1538,9 +1617,7 @@
     if (local.missing.length || consoleCommand.missing.length) {
       return notice(`Treść rozpoczęcia wymaga danych: ${[...new Set([...local.missing, ...consoleCommand.missing])].join(", ")}.`);
     }
-    await wait(config.startDelaySeconds * 1000);
-    const localResult = await sendLocal(local.content);
-    if (!localResult) return notice("Nie udało się wysłać obowiązkowej informacji na czat lokalny. Sesja nie została utworzona.");
+    const consoleResult = sendConsole(consoleCommand.content);
     try {
       state.active = createVerification({
         world: game.world(),
@@ -1555,15 +1632,14 @@
         x: player.x,
         y: player.y
       });
-      await recordCommand("ROZPOCZĘCIE — CZAT LOKALNY", local.content, "LOCAL", nick);
-      await wait(config.startDelaySeconds * 1000);
-      if (sendConsole(consoleCommand.content)) {
+      if (consoleResult) {
         await recordCommand("ROZPOCZĘCIE — UPOMNIENIE", consoleCommand.content, "CONSOLE", nick);
       }
+      void sendDelayedLocal(local.content, "ROZPOCZĘCIE — CZAT LOKALNY", nick);
       selectPlayers([{ nick, id: player.id || resolvePlayerId(nick) || "" }]);
       localStorage.setItem(ACTIVE_PANEL_OPEN_KEY, "1");
       showActive();
-      await loadAccount(player);
+      void loadAccount(player);
       notice(`Rozpoczęto weryfikację gracza ${nick}. Kod: ${code}.`);
     } catch (error) {
       if (error.message === "ACTIVE_VERIFICATION_EXISTS") {
@@ -1597,11 +1673,7 @@
     if (local.missing.length || consoleCommand.missing.length) {
       return notice(`Treść rozpoczęcia wymaga danych: ${[...new Set([...local.missing, ...consoleCommand.missing])].join(", ")}.`);
     }
-    await wait(config.startDelaySeconds * 1000);
-    const localResult = await sendLocal(local.content);
-    if (!localResult) {
-      return notice("Nie udało się wysłać obowiązkowej informacji na czat lokalny. Gracz nie został dodany.");
-    }
+    const consoleResult = sendConsole(consoleCommand.content);
     try {
       state.active = updateVerification(verification.id, (record, database) => {
         if ((record.participants || []).some(item => !item.resolved_at && sameNick(item.character_name, nick))) {
@@ -1630,18 +1702,17 @@
           participantId: participant.id
         });
       });
-      await recordCommand("DOŁĄCZENIE DO WERYFIKACJI — CZAT LOKALNY", local.content, "LOCAL", nick);
-      await wait(config.startDelaySeconds * 1000);
-      if (sendConsole(consoleCommand.content)) {
+      if (consoleResult) {
         await recordCommand("DOŁĄCZENIE DO WERYFIKACJI — UPOMNIENIE", consoleCommand.content, "CONSOLE", nick);
       } else {
         notice(`Dodano ${nick}, ale klient nie udostępnił konsoli do wysłania .reminder.`);
       }
+      void sendDelayedLocal(local.content, "DOŁĄCZENIE DO WERYFIKACJI — CZAT LOKALNY", nick);
       selectPlayers([
         ...selectedPlayers(),
         { nick, id: player.id || resolvePlayerId(nick) || "" }
       ], { renderActive: true });
-      await loadAccount(player);
+      void loadAccount(player);
       notice(`Dodano ${nick} do aktywnej weryfikacji. Kod gracza: ${code}.`);
     } catch (error) {
       const label = error.message === "PARTICIPANT_ALREADY_ADDED" ? "Ten gracz jest już w aktywnej weryfikacji." : error.message;
@@ -1948,7 +2019,7 @@
 
         <div class="mc-selected">Wybrany gracz: <strong data-selected>nie rozpoznano</strong></div>
         <div class="mc-search">
-          <input data-search placeholder="ID konta lub link profilu, np. 8863242">
+          <input data-search placeholder="ID konta lub link profilu, np. 8863242" value="${escapeAttribute(readAccountSearch().join(" "))}">
           <button type="button" data-select-player>Wykryj postacie</button>
           <button type="button" data-clear-player>Wyczyść</button>
         </div>
@@ -1973,10 +2044,10 @@
 
         <details class="mc-block">
           <summary>Polecenia weryfikacyjne <b>ZAPIS LOKALNY</b></summary>
-          <p>Pierwsza wiadomość trafia na czat lokalny, a następnie polecenie do konsoli. Sesję rozpoczynasz przez PPM na graczu.</p>
+          <p>Polecenie do konsoli jest wysyłane od razu, a wiadomość lokalna po ustawionym opóźnieniu. Sesję rozpoczynasz przez PPM na graczu.</p>
           <div class="mc-start-local-row">
             <label>Wiadomość lokalna<textarea data-start-local>${escapeMarkup(start.local)}</textarea></label>
-            <label class="mc-start-delay">Opóźnienie wiadomości i konsoli (s)<input type="number" min="0" step="0.1" inputmode="decimal" data-start-delay value="${escapeAttribute(start.startDelaySeconds)}"></label>
+            <label class="mc-start-delay">Opóźnienie wiadomości lokalnej (s)<input type="number" min="0" step="0.1" inputmode="decimal" data-start-delay value="${escapeAttribute(start.startDelaySeconds)}"></label>
           </div>
           <label>Komenda konsoli<textarea data-start-console>${escapeMarkup(start.console)}</textarea></label>
           <label>Polecenie „Wyślij kod”<textarea data-send-code-command>${escapeMarkup(start.sendCode)}</textarea></label>
@@ -2207,7 +2278,7 @@
         return;
       }
       if (button.matches("[data-clear-participant-selection]")) {
-        clearAccountSearch();
+        clearAccountSearchView();
         return notice("Wyczyszczono wybór uczestników.");
       }
       if (button.matches("[data-finish-all-participants]")) return finishAll();
@@ -2935,5 +3006,5 @@
     delete game.page()[RUNTIME_GUARD];
   }
 
-  console.info("[Centrum Moderacji] v3.4.8 gotowe.");
+  console.info("[Centrum Moderacji] v3.4.9 gotowe.");
 })();
