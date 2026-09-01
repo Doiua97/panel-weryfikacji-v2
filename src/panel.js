@@ -3,7 +3,7 @@
 
   const RUNTIME_GUARD = "__MARGO_MODERATION_CENTER_RUNTIME__";
   if (window[RUNTIME_GUARD]) return;
-  window[RUNTIME_GUARD] = "3.5.0";
+  window[RUNTIME_GUARD] = version;
 
   const SCRIPT_ID = "margo-moderation-center";
   const DB_KEY = `${SCRIPT_ID}:local-database:v1`;
@@ -2636,5 +2636,5 @@
     delete game.page()[RUNTIME_GUARD];
   }
 
-  console.info("[Centrum Moderacji] v3.5.0 gotowe.");
+  console.info(`[Centrum Moderacji] v${version} gotowe.`);
 })();
