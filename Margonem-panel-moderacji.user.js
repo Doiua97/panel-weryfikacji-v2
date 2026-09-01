@@ -18,7 +18,7 @@
 // @grant        GM_info
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
-// @connect      github.com
+// @connect      raw.githubusercontent.com
 // @connect      www.margonem.pl
 // @connect      www.margonem.com
 // @downloadURL  https://github.com/Doiua97/panel-weryfikacji-v2/raw/refs/heads/main/Margonem-panel-moderacji.user.js
@@ -26,31 +26,35 @@
 // ==/UserScript==
 
 (async () => {
-  const base = "https://github.com/Doiua97/panel-weryfikacji-v2/raw/refs/heads/main/src";
+  const base = "https://raw.githubusercontent.com/Doiua97/panel-weryfikacji-v2/main/src";
   const version = GM_info.script.version;
 
-  const get = url => new Promise((resolve, reject) =>
+  const get = file => new Promise((resolve, reject) =>
     GM_xmlhttpRequest({
       method: "GET",
-      url: `${url}?v=${version}`,
-      onload: r => r.status < 400 ? resolve(r.responseText) : reject(new Error(`HTTP ${r.status}`)),
-      onerror: reject
+      url: `${base}/${file}?v=${version}`,
+      onload: r => r.status >= 200 && r.status < 400
+        ? resolve(r.responseText)
+        : reject(new Error(`HTTP ${r.status}`)),
+      onerror: () => reject(new Error("Błąd połączenia"))
     })
   );
 
   try {
     const style = document.createElement("style");
     style.id = "margo-moderation-center-styles";
-    style.textContent = await get(`${base}/panel.css`);
+    style.textContent = await get("panel.css");
     document.head.appendChild(style);
 
-    const js = await get(`${base}/panel.js`);
-    new Function("GM_xmlhttpRequest", "unsafeWindow", "version", js)(
-      GM_xmlhttpRequest,
-      unsafeWindow,
-      version
-    );
+    const js = await get("panel.js");
+    new Function(
+      "GM_xmlhttpRequest",
+      "unsafeWindow",
+      "version",
+      js
+    )(GM_xmlhttpRequest, unsafeWindow, version);
   } catch (error) {
+    document.getElementById("margo-moderation-center-styles")?.remove();
     console.error("[Centrum Moderacji]", error);
   }
 })();
