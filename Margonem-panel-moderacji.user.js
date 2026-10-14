@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Margonem — Centrum Moderacji v2
 // @namespace    https://github.com/Doiua97/panel-moderacji-weryfikacji
-// @version      3.5.0
+// @version      3.5.1
 // @description  Lokalne centrum moderacji i dokumentowania weryfikacji w Margonem.
 // @author       Doiua
 // @match        https://*.margonem.pl/*
