@@ -1596,7 +1596,6 @@
 
   function groupLocalReady() {
     const engine = game.engine();
-    if (engine?.tickSuccess === false) return false;
     const wrapper = engine?.chatController?.getChatInputWrapper?.();
     if (wrapper?.getChatNotificationManager?.()?.checkBlockadeLeftSeconds?.("LOCAL")) return false;
     // Native _g deduplicates queued chat requests without comparing their payloads.
