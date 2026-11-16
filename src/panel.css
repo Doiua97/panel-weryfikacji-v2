@@ -70,6 +70,11 @@
       #margo-moderation-center-panel input,#margo-moderation-center-panel textarea,#margo-moderation-center-panel select{width:100%;padding:8px;border:1px solid rgba(111,116,106,.68);border-radius:2px;outline:none;background:rgba(5,6,5,.72);color:#eeeae0;box-shadow:inset 0 1px 3px rgba(0,0,0,.72)}
       #margo-moderation-center-active-panel .mc-participant-session.selected-target{outline:1px solid var(--mc-green);outline-offset:-1px;background:rgba(68,83,52,.46)}
       #margo-moderation-center-panel input[type="checkbox"]{accent-color:var(--mc-green)}
+      #margo-moderation-center-panel .mc-group-start{display:flex;flex-wrap:wrap;align-items:stretch;gap:5px;margin:9px 0}
+      #margo-moderation-center-panel .mc-group-start [data-start-group]{flex:1 1 165px;min-width:0;border-color:var(--mc-green);color:var(--mc-green-strong)}
+      #margo-moderation-center-panel .mc-group-start [data-group-bind]{flex:0 1 auto;max-width:100%;overflow-wrap:anywhere;font-size:11px}
+      #margo-moderation-center-panel .mc-group-start [data-group-bind][aria-pressed="true"]{border-color:var(--mc-gold);color:var(--mc-gold)}
+      #margo-moderation-center-panel .mc-group-start [data-clear-group-bind]{flex:0 0 28px;padding:4px;font-size:17px}
       #margo-moderation-center-panel .mc-selected,#margo-moderation-center-panel .mc-account-group-head,#margo-moderation-center-panel .mc-account-batch span,
       #margo-moderation-center-active-panel .mc-participant-actions span{color:var(--mc-muted)}
       #margo-moderation-center-panel textarea{min-height:55px;resize:vertical}

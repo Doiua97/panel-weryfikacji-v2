@@ -16,6 +16,8 @@
   const PENDING_KEY = `${SCRIPT_ID}:pending-account-verification:v1`;
   const ACCOUNT_KEY = `${SCRIPT_ID}:account-search:v1`;
   const CONFIG_KEY = `${SCRIPT_ID}:start-config`;
+  const GROUP_BIND_KEY = `${SCRIPT_ID}:group-verification-bind:v1`;
+  const LOCAL_MESSAGE_LIMIT = 200;
   const MIGRATION_KEY = `${SCRIPT_ID}:default-configuration:2026-08-24-v2`;
   const WIDGET_KEY = "MARGO_MODERATION_CENTER";
   const MENU_HOOK = "__margoModerationCenterPlayerMenuHook__";
@@ -61,7 +63,11 @@
     versions: new Map(),
     confirm: null,
     initialized: false,
-    dragFrame: 0
+    dragFrame: 0,
+    groupBind: null,
+    groupCapture: false,
+    groupHeld: new Set(),
+    groupRun: null
   };
   const game = {
     page() {
@@ -135,6 +141,7 @@
       state.collapsed = localStorage.getItem(MAP_STATE) === "1";
       sync();
       bindGame();
+      bindGroupKeys();
       if (!widget()) launcher();
       hookMenu();
       window.addEventListener("beforeunload", dispose, { once: true });
@@ -229,6 +236,10 @@
         renderPending();
       }
       if (event.key === CONFIG_KEY) store.config = readConfig(true, event.newValue);
+      if (event.key === GROUP_BIND_KEY) {
+        runtime.groupBind = readGroupBind();
+        renderGroupBind();
+      }
     };
     const visibility = () => updateTimers();
     window.addEventListener("storage", storage);
@@ -1437,7 +1448,7 @@
     return Promise.resolve().then(action).finally(() => runtime.running.delete(key));
   }
 
-  function verify(player) {
+  function verify(player, options = {}) {
     const nick = normalize(player?.nick);
     return runOnce(`verify:${nick.toLocaleLowerCase("pl")}`, async () => {
       let info = state.active?.verification;
@@ -1452,7 +1463,7 @@
       const account = parseId(player?.accountId) || accountId(game.other(id));
       const map = game.map();
       const code = genCode();
-      const config = readConfig();
+      const config = options.config || readConfig();
       const data = { nick, moderator: mod, kod: code, czas: "", powod: "", tresc: "" };
       const local = fill(config.local, data);
       const command = fill(config.console, data);
@@ -1513,7 +1524,7 @@
             render({ main: true });
           }
         }
-        void sendLater(local.content, `${name} — CZAT LOKALNY`, nick);
+        if (options.local !== false) void sendLater(local.content, `${name} — CZAT LOKALNY`, nick);
         select([...(info ? state.selected : []), { nick, id: id || "" }], { renderActive: Boolean(info) });
         if (!info) {
           const input = state.panel?.querySelector("[data-code]");
@@ -1538,6 +1549,235 @@
   function findParticipant(nick) {
     const wanted = normalize(nick).toLocaleLowerCase("pl");
     return state.active?.participants?.find(item => normalize(item.character_name).toLocaleLowerCase("pl") === wanted) || null;
+  }
+
+  function groupLocalMessages(players, config, moderator) {
+    const messages = [];
+    if (!config.local.trim()) return messages;
+    const personalCode = /\{kod\}/i.test(config.local);
+    const build = targets => fill(config.local, {
+      nick: targets.map(player => player.nick).join(", "),
+      moderator,
+      kod: targets[0]?.verification_code || "0000",
+      czas: "", powod: "", tresc: ""
+    });
+    const length = content => new TextEncoder().encode(content).length;
+    let targets = [];
+    for (const player of players) {
+      const single = build([player]);
+      if (single.missing.length) throw new Error(`Treść rozpoczęcia wymaga danych: ${single.missing.join(", ")}.`);
+      if (length(single.content) > LOCAL_MESSAGE_LIMIT) {
+        throw new Error(`Regułka z nickiem ${player.nick} przekracza limit ${LOCAL_MESSAGE_LIMIT}. Skróć treść wiadomości lokalnej.`);
+      }
+      const candidate = [...targets, player];
+      if (targets.length && (personalCode || length(build(candidate).content) > LOCAL_MESSAGE_LIMIT)) {
+        messages.push({ content: build(targets).content, targets });
+        targets = [];
+      }
+      targets.push(player);
+    }
+    if (targets.length) messages.push({ content: build(targets).content, targets });
+    return messages;
+  }
+
+  function groupContextMatches(run) {
+    return game.heroId() === run.heroId && worldKey(game.world()) === run.world &&
+      game.map().id === run.mapId && state.active?.verification?.id === run.sessionId &&
+      state.active.verification.status === "ACTIVE";
+  }
+
+  function cancelGroupLocals() {
+    const run = runtime.groupRun;
+    if (!run) return;
+    clearTimeout(run.timer);
+    cancelAnimationFrame(run.frame);
+    runtime.groupRun = null;
+  }
+
+  function groupLocalReady() {
+    const engine = game.engine();
+    if (engine?.tickSuccess === false) return false;
+    const wrapper = engine?.chatController?.getChatInputWrapper?.();
+    if (wrapper?.getChatNotificationManager?.()?.checkBlockadeLeftSeconds?.("LOCAL")) return false;
+    // Native _g deduplicates queued chat requests without comparing their payloads.
+    // Wait for that request to leave the client's queue, rather than losing a packet.
+    return !(engine?.communication?.taskQueue || []).some(task =>
+      String(task).startsWith("chat&") && /(?:^|&)channel=local(?:&|$)/.test(task)
+    );
+  }
+
+  async function sendGroupLocal(run) {
+    if (runtime.groupRun !== run) return;
+    if (!groupContextMatches(run)) return cancelGroupLocals();
+    if (!groupLocalReady()) {
+      run.frame = requestAnimationFrame(() => { void sendGroupLocal(run); });
+      return;
+    }
+    run.frame = 0;
+    const packet = run.messages[run.index];
+    const targets = packet.targets.filter(player => findActive(player.participantId));
+    if (targets.length) {
+      const content = targets.length === packet.targets.length ? packet.content
+        : groupLocalMessages(targets, run.config, run.moderator)[0].content;
+      const sent = await sendLocal(content);
+      if (sent && runtime.groupRun === run && groupContextMatches(run)) {
+        // One actual chat message, attached to each participant by the existing journal.
+        for (const player of targets) await log("ROZPOCZĘCIE GRUPOWE — CZAT LOKALNY", content, "LOCAL", player.nick);
+      } else if (!sent) notice("Nie udało się wysłać komunikatu lokalnego weryfikacji grupowej.");
+    }
+    if (runtime.groupRun !== run) return;
+    run.index += 1;
+    if (run.index >= run.messages.length) return cancelGroupLocals();
+    run.timer = setTimeout(() => { void sendGroupLocal(run); }, run.config.startDelaySeconds * 1000);
+  }
+
+  function verifyGroup() {
+    return runOnce("verify-group", async () => {
+      if (runtime.groupRun) {
+        if (groupContextMatches(runtime.groupRun)) return notice("Komunikaty poprzedniej weryfikacji grupowej są jeszcze wysyłane.");
+        cancelGroupLocals();
+      }
+      const config = { ...readConfig() };
+      const moderator = game.heroNick();
+      if (!moderator) return notice("Klient gry nie udostępnił danych aktualnej postaci.");
+      if (typeof game.engine()?.console?.commandLine?.sendMessage !== "function") return notice("Konsola gry nie jest obecnie dostępna.");
+      const players = excludeSelf(Object.values(game.others()).map(playerInfo).filter(Boolean))
+        .filter((player, index, list) => list.findIndex(item => sameNick(item.nick, player.nick)) === index)
+        .filter(player => !(state.active?.participants || []).some(item => !item.resolved_at && sameNick(item.character_name, player.nick)));
+      if (!players.length) return notice("Brak nowych graczy do weryfikacji na bieżącej mapie.");
+      try {
+        groupLocalMessages(players, config, moderator);
+      } catch (error) {
+        return notice(error.message);
+      }
+      const context = { heroId: game.heroId(), world: worldKey(game.world()), mapId: game.map().id };
+      // All reminders and participant records use the original verification path.
+      // Profile loading remains fire-and-forget inside verify(), as before.
+      const results = await Promise.all(players.map(player => verify(player, { local: false, config })));
+      const targets = players.flatMap((player, index) => {
+        if (results[index] !== true) return [];
+        const stored = [...(state.active?.participants || [])].reverse().find(item =>
+          !item.resolved_at && sameNick(item.character_name, player.nick)
+        );
+        return stored ? [{ ...player, participantId: stored.id, verification_code: stored.verification_code }] : [];
+      });
+      if (!targets.length) return;
+      const run = {
+        ...context, sessionId: state.active?.verification?.id, config, moderator,
+        messages: groupLocalMessages(targets, config, moderator), index: 0, timer: 0, frame: 0
+      };
+      if (run.messages.length && groupContextMatches(run)) {
+        runtime.groupRun = run;
+        void sendGroupLocal(run);
+      }
+      notice(`Rozpoczęto weryfikację grupową: ${targets.length} graczy. Komunikaty lokalne: ${run.messages.length}.`);
+    });
+  }
+
+  function normalizeGroupBind(value) {
+    if (!value || !/^(Key[A-Z]|Backquote|Minus|Equal|BracketLeft|BracketRight|Backslash|Semicolon|Quote|Comma|Period|Slash)$/.test(value.code)) return null;
+    if (typeof value.key !== "string" || !value.key || value.key.length > 8 || /\p{Nd}/u.test(value.key)) return null;
+    return { code: value.code, key: value.key.toUpperCase(), ctrl: value.ctrl === true, alt: value.alt === true, shift: value.shift === true };
+  }
+
+  function readGroupBind() {
+    try { return normalizeGroupBind(JSON.parse(localStorage.getItem(GROUP_BIND_KEY) || "null")); }
+    catch { return null; }
+  }
+
+  function groupBindLabel(bind) {
+    return bind ? [bind.ctrl && "Ctrl", bind.alt && "Alt", bind.shift && "Shift", bind.key].filter(Boolean).join("+") : "brak";
+  }
+
+  function groupBindConflict(bind) {
+    const keys = game.engine()?.hotKeys?.hotKeys;
+    if (!keys || typeof keys !== "object") return "Nie można odczytać aktualnych bindów klienta.";
+    const combined = groupBindLabel(bind).toUpperCase();
+    const exact = Object.entries(keys).find(([key, action]) => action && key.toUpperCase() === combined);
+    // The supplied client ignores Ctrl for regular hotkeys, but movement still
+    // handles modified keys. Shift/Alt alone do not suppress ordinary hotkeys.
+    const assigned = Object.entries(keys).find(([key, action]) => action &&
+      key.toUpperCase() === bind.key && (!bind.ctrl || /^move_(up|down|left|right)$/.test(action))
+    );
+    const conflict = exact || assigned;
+    return conflict ? `Skrót jest zajęty przez klienta: ${conflict[1]}.` : "";
+  }
+
+  function renderGroupBind() {
+    const button = state.panel?.querySelector("[data-group-bind]");
+    if (!button) return;
+    button.textContent = runtime.groupCapture ? "Naciśnij skrót…" : `Bind: ${groupBindLabel(runtime.groupBind)}`;
+    button.setAttribute("aria-pressed", String(runtime.groupCapture));
+    button.title = runtime.groupCapture ? "Naciśnij kombinację. Escape anuluje przypisywanie."
+      : runtime.groupBind ? groupBindConflict(runtime.groupBind) || "Zmień skrót weryfikacji grupowej" : "Przypisz skrót weryfikacji grupowej";
+    const clear = state.panel.querySelector("[data-clear-group-bind]");
+    if (clear) clear.disabled = !runtime.groupBind && !runtime.groupCapture;
+  }
+
+  function groupEditable(target) {
+    return Boolean(target?.isContentEditable || target?.closest?.("input, textarea, select, magic_input, [contenteditable]:not([contenteditable='false'])"));
+  }
+
+  function bindGroupKeys() {
+    runtime.groupBind = readGroupBind();
+    const consume = event => { event.preventDefault(); event.stopImmediatePropagation(); };
+    const down = event => {
+      if (event.isComposing || event.metaKey || event.getModifierState?.("AltGraph") || groupEditable(event.target)) return;
+      if (runtime.confirm) {
+        runtime.groupCapture = false;
+        renderGroupBind();
+        return;
+      }
+      if (runtime.groupHeld.has(event.code)) { consume(event); return; }
+      if (event.repeat) return;
+      if (runtime.groupCapture) {
+        if (["Control", "Alt", "Shift", "Meta"].includes(event.key)) return;
+        consume(event);
+        runtime.groupHeld.add(event.code);
+        if (event.key === "Escape") {
+          runtime.groupCapture = false;
+          renderGroupBind();
+          return;
+        }
+        const bind = normalizeGroupBind({ code: event.code, key: event.key, ctrl: event.ctrlKey, alt: event.altKey, shift: event.shiftKey });
+        const problem = bind ? groupBindConflict(bind) : "Cyfry, Enter, Escape i klawisze sterujące nie mogą być bindem weryfikacji grupowej.";
+        if (problem) return notice(problem);
+        runtime.groupBind = bind;
+        runtime.groupCapture = false;
+        localStorage.setItem(GROUP_BIND_KEY, JSON.stringify(bind));
+        renderGroupBind();
+        return;
+      }
+      const bind = runtime.groupBind;
+      if (!bind || event.code !== bind.code || event.ctrlKey !== bind.ctrl || event.altKey !== bind.alt || event.shiftKey !== bind.shift) return;
+      if (runtime.confirm || !game.engine()?.allInit || game.engine()?.settings?.getBlockInput?.()) return;
+      const problem = groupBindConflict(bind);
+      if (problem) { renderGroupBind(); notice(problem); return; }
+      consume(event);
+      runtime.groupHeld.add(event.code);
+      void verifyGroup();
+    };
+    const up = event => {
+      if (!runtime.groupHeld.delete(event.code)) return;
+      consume(event);
+    };
+    const press = event => { if (runtime.groupHeld.has(event.code)) consume(event); };
+    const blur = () => { runtime.groupHeld.clear(); runtime.groupCapture = false; renderGroupBind(); };
+    const focus = event => { if (runtime.groupCapture && groupEditable(event.target)) { runtime.groupCapture = false; renderGroupBind(); } };
+    window.addEventListener("keydown", down, true);
+    window.addEventListener("keyup", up, true);
+    window.addEventListener("keypress", press, true);
+    window.addEventListener("blur", blur);
+    document.addEventListener("focusin", focus);
+    runtime.cleanup.push(() => {
+      window.removeEventListener("keydown", down, true);
+      window.removeEventListener("keyup", up, true);
+      window.removeEventListener("keypress", press, true);
+      window.removeEventListener("blur", blur);
+      document.removeEventListener("focusin", focus);
+      blur();
+      cancelGroupLocals();
+    });
   }
 
   function findActive(id, players = state.active?.participants) {
@@ -1825,6 +2065,7 @@
   }
 
   function closePanel() {
+    runtime.groupCapture = false;
     save(state.panel, false);
     state.panelCleanup?.();
     state.panelCleanup = null;
@@ -1845,6 +2086,11 @@
           </div>
         </header>
 
+        <div class="mc-group-start">
+          <button type="button" data-start-group>Weryfikacja Grupowa</button>
+          <button type="button" data-group-bind aria-pressed="false">Bind: ${escHtml(groupBindLabel(runtime.groupBind))}</button>
+          <button type="button" data-clear-group-bind aria-label="Usuń bind weryfikacji grupowej" title="Usuń bind">×</button>
+        </div>
         <div class="mc-selected">Wybrany gracz: <strong data-selected>nie rozpoznano</strong></div>
         <div class="mc-search">
           <input data-search placeholder="ID konta lub link profilu, np. 8863242">
@@ -1873,6 +2119,7 @@
         <details class="mc-block">
           <summary>Polecenia weryfikacyjne <b>ZAPIS LOKALNY</b></summary>
           <p>Polecenie do konsoli jest wysyłane od razu, a wiadomość lokalna po ustawionym opóźnieniu. Sesję rozpoczynasz przez PPM na graczu.</p>
+          <p>Weryfikacja Grupowa używa poniższych treści. Opóźnienie określa przerwę między jej wiadomościami lokalnymi; upomnienia są uruchamiane od razu dla całej grupy.</p>
           <div class="mc-start-local-row">
             <label>Wiadomość lokalna<textarea data-start-local>${escHtml(start.local)}</textarea></label>
             <label class="mc-start-delay">Opóźnienie wiadomości lokalnej (s)<input type="number" min="0" step="0.1" inputmode="decimal" data-start-delay value="${escAttr(start.startDelaySeconds)}"></label>
@@ -1920,6 +2167,18 @@
       stopMove();
     };
     overlay.querySelector("[data-close]").addEventListener("click", closePanel);
+    overlay.querySelector("[data-start-group]").addEventListener("click", () => { void verifyGroup(); });
+    overlay.querySelector("[data-group-bind]").addEventListener("click", () => {
+      runtime.groupCapture = !runtime.groupCapture;
+      renderGroupBind();
+    });
+    overlay.querySelector("[data-clear-group-bind]").addEventListener("click", () => {
+      runtime.groupBind = null;
+      runtime.groupCapture = false;
+      localStorage.removeItem(GROUP_BIND_KEY);
+      renderGroupBind();
+    });
+    renderGroupBind();
     overlay.querySelector("[data-select-player]").addEventListener("click", search);
     overlay.querySelector("[data-add-auto-account]").addEventListener("click", addPending);
     overlay.querySelector("[data-auto-account-input]").addEventListener("keydown", event => { if (event.key === "Enter") addPending(); });
