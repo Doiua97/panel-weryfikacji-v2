@@ -67,7 +67,7 @@
     groupBind: null,
     groupCapture: false,
     groupHeld: new Set(),
-    groupRun: null
+    groupTimers: new Set()
   };
   const game = {
     page() {
@@ -1448,7 +1448,7 @@
     return Promise.resolve().then(action).finally(() => runtime.running.delete(key));
   }
 
-  function verify(player, options = {}) {
+  function verify(player, groupLocal = false) {
     const nick = normalize(player?.nick);
     return runOnce(`verify:${nick.toLocaleLowerCase("pl")}`, async () => {
       let info = state.active?.verification;
@@ -1463,7 +1463,7 @@
       const account = parseId(player?.accountId) || accountId(game.other(id));
       const map = game.map();
       const code = genCode();
-      const config = options.config || readConfig();
+      const config = readConfig();
       const data = { nick, moderator: mod, kod: code, czas: "", powod: "", tresc: "" };
       const local = fill(config.local, data);
       const command = fill(config.console, data);
@@ -1524,7 +1524,7 @@
             render({ main: true });
           }
         }
-        if (options.local !== false) void sendLater(local.content, `${name} — CZAT LOKALNY`, nick);
+        if (!groupLocal) void sendLater(local.content, `${name} — CZAT LOKALNY`, nick);
         select([...(info ? state.selected : []), { nick, id: id || "" }], { renderActive: Boolean(info) });
         if (!info) {
           const input = state.panel?.querySelector("[data-code]");
@@ -1580,62 +1580,8 @@
     return messages;
   }
 
-  function groupContextMatches(run) {
-    return game.heroId() === run.heroId && worldKey(game.world()) === run.world &&
-      game.map().id === run.mapId && state.active?.verification?.id === run.sessionId &&
-      state.active.verification.status === "ACTIVE";
-  }
-
-  function cancelGroupLocals() {
-    const run = runtime.groupRun;
-    if (!run) return;
-    clearTimeout(run.timer);
-    cancelAnimationFrame(run.frame);
-    runtime.groupRun = null;
-  }
-
-  function groupLocalReady() {
-    const engine = game.engine();
-    const wrapper = engine?.chatController?.getChatInputWrapper?.();
-    if (wrapper?.getChatNotificationManager?.()?.checkBlockadeLeftSeconds?.("LOCAL")) return false;
-    // Native _g deduplicates queued chat requests without comparing their payloads.
-    // Wait for that request to leave the client's queue, rather than losing a packet.
-    return !(engine?.communication?.taskQueue || []).some(task =>
-      String(task).startsWith("chat&") && /(?:^|&)channel=local(?:&|$)/.test(task)
-    );
-  }
-
-  async function sendGroupLocal(run) {
-    if (runtime.groupRun !== run) return;
-    if (!groupContextMatches(run)) return cancelGroupLocals();
-    if (!groupLocalReady()) {
-      run.frame = requestAnimationFrame(() => { void sendGroupLocal(run); });
-      return;
-    }
-    run.frame = 0;
-    const packet = run.messages[run.index];
-    const targets = packet.targets.filter(player => findActive(player.participantId));
-    if (targets.length) {
-      const content = targets.length === packet.targets.length ? packet.content
-        : groupLocalMessages(targets, run.config, run.moderator)[0].content;
-      const sent = await sendLocal(content);
-      if (sent && runtime.groupRun === run && groupContextMatches(run)) {
-        // One actual chat message, attached to each participant by the existing journal.
-        for (const player of targets) await log("ROZPOCZĘCIE GRUPOWE — CZAT LOKALNY", content, "LOCAL", player.nick);
-      } else if (!sent) notice("Nie udało się wysłać komunikatu lokalnego weryfikacji grupowej.");
-    }
-    if (runtime.groupRun !== run) return;
-    run.index += 1;
-    if (run.index >= run.messages.length) return cancelGroupLocals();
-    run.timer = setTimeout(() => { void sendGroupLocal(run); }, run.config.startDelaySeconds * 1000);
-  }
-
   function verifyGroup() {
     return runOnce("verify-group", async () => {
-      if (runtime.groupRun) {
-        if (groupContextMatches(runtime.groupRun)) return notice("Komunikaty poprzedniej weryfikacji grupowej są jeszcze wysyłane.");
-        cancelGroupLocals();
-      }
       const config = { ...readConfig() };
       const moderator = game.heroNick();
       if (!moderator) return notice("Klient gry nie udostępnił danych aktualnej postaci.");
@@ -1649,10 +1595,9 @@
       } catch (error) {
         return notice(error.message);
       }
-      const context = { heroId: game.heroId(), world: worldKey(game.world()), mapId: game.map().id };
       // All reminders and participant records use the original verification path.
       // Profile loading remains fire-and-forget inside verify(), as before.
-      const results = await Promise.all(players.map(player => verify(player, { local: false, config })));
+      const results = await Promise.all(players.map(player => verify(player, true)));
       const targets = players.flatMap((player, index) => {
         if (results[index] !== true) return [];
         const stored = [...(state.active?.participants || [])].reverse().find(item =>
@@ -1661,15 +1606,26 @@
         return stored ? [{ ...player, participantId: stored.id, verification_code: stored.verification_code }] : [];
       });
       if (!targets.length) return;
-      const run = {
-        ...context, sessionId: state.active?.verification?.id, config, moderator,
-        messages: groupLocalMessages(targets, config, moderator), index: 0, timer: 0, frame: 0
-      };
-      if (run.messages.length && groupContextMatches(run)) {
-        runtime.groupRun = run;
-        void sendGroupLocal(run);
-      }
-      notice(`Rozpoczęto weryfikację grupową: ${targets.length} graczy. Komunikaty lokalne: ${run.messages.length}.`);
+      const messages = groupLocalMessages(targets, config, moderator);
+      const sessionId = state.active?.verification?.id;
+      messages.forEach((packet, index) => {
+        const announce = async () => {
+          // Original transport, with only the configured spacing between locals.
+          const sent = await sendLocal(packet.content);
+          if (sent && state.active?.verification?.id === sessionId) {
+            for (const player of packet.targets) await log("ROZPOCZĘCIE GRUPOWE — CZAT LOKALNY", packet.content, "LOCAL", player.nick);
+          }
+        };
+        if (index === 0) void announce();
+        else {
+          const timer = setTimeout(() => {
+            runtime.groupTimers.delete(timer);
+            void announce();
+          }, index * config.startDelaySeconds * 1000);
+          runtime.groupTimers.add(timer);
+        }
+      });
+      notice(`Rozpoczęto weryfikację grupową: ${targets.length} graczy. Komunikaty lokalne: ${messages.length}.`);
     });
   }
 
@@ -1775,7 +1731,8 @@
       window.removeEventListener("blur", blur);
       document.removeEventListener("focusin", focus);
       blur();
-      cancelGroupLocals();
+      for (const timer of runtime.groupTimers) clearTimeout(timer);
+      runtime.groupTimers.clear();
     });
   }
 
